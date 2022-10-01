@@ -138,6 +138,27 @@ public final class Call {
     public static final int STATE_SIMULATED_RINGING = 13;
 
     /**
+     * @hide
+     */
+    @IntDef(prefix = { "STATE_" },
+            value = {
+                    STATE_NEW,
+                    STATE_DIALING,
+                    STATE_RINGING,
+                    STATE_HOLDING,
+                    STATE_ACTIVE,
+                    STATE_DISCONNECTED,
+                    STATE_SELECT_PHONE_ACCOUNT,
+                    STATE_CONNECTING,
+                    STATE_DISCONNECTING,
+                    STATE_PULLING_CALL,
+                    STATE_AUDIO_PROCESSING,
+                    STATE_SIMULATED_RINGING
+            })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface CallState {};
+
+    /**
      * The key to retrieve the optional {@code PhoneAccount}s Telecom can bundle with its Call
      * extras. Used to pass the phone accounts to display on the front end to the user in order to
      * select phone accounts to (for example) place a call.
@@ -543,8 +564,14 @@ public final class Call {
          */
         public static final int CAPABILITY_TRANSFER_CONSULTATIVE = 0x08000000;
 
+        /**
+         * Indicates whether the remote party supports RTT or not to the UI.
+         */
+
+        public static final int CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT = 0x10000000;
+
         //******************************************************************************************
-        // Next CAPABILITY value: 0x10000000
+        // Next CAPABILITY value: 0x20000000
         //******************************************************************************************
 
         /**
@@ -665,10 +692,20 @@ public final class Call {
          */
         public static final int PROPERTY_IS_ADHOC_CONFERENCE = 0x00002000;
 
+        /**
+         * Connection is using cross sim technology.
+         * <p>
+         * Indicates that the {@link Connection} is using a cross sim technology which would
+         * register IMS over internet APN of default data subscription.
+         * <p>
+         */
+        public static final int PROPERTY_CROSS_SIM = 0x00004000;
+
         //******************************************************************************************
         // Next PROPERTY value: 0x00004000
         //******************************************************************************************
 
+        private final @CallState int mState;
         private final String mTelecomCallId;
         private final Uri mHandle;
         private final int mHandlePresentation;
@@ -786,6 +823,9 @@ public final class Call {
             if (can(capabilities, CAPABILITY_TRANSFER_CONSULTATIVE)) {
                 builder.append(" CAPABILITY_TRANSFER_CONSULTATIVE");
             }
+            if (can(capabilities, CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT)) {
+                builder.append(" CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT");
+            }
             builder.append("]");
             return builder.toString();
         }
@@ -856,8 +896,18 @@ public final class Call {
             if (hasProperty(properties, PROPERTY_IS_ADHOC_CONFERENCE)) {
                 builder.append(" PROPERTY_IS_ADHOC_CONFERENCE");
             }
+            if (hasProperty(properties, PROPERTY_CROSS_SIM)) {
+                builder.append(" PROPERTY_CROSS_SIM");
+            }
             builder.append("]");
             return builder.toString();
+        }
+
+        /**
+         * @return the state of the {@link Call} represented by this {@link Call.Details}.
+         */
+        public final @CallState int getState() {
+            return mState;
         }
 
         /** {@hide} */
@@ -1061,6 +1111,7 @@ public final class Call {
             if (o instanceof Details) {
                 Details d = (Details) o;
                 return
+                        Objects.equals(mState, d.mState) &&
                         Objects.equals(mHandle, d.mHandle) &&
                         Objects.equals(mHandlePresentation, d.mHandlePresentation) &&
                         Objects.equals(mCallerDisplayName, d.mCallerDisplayName) &&
@@ -1087,7 +1138,8 @@ public final class Call {
 
         @Override
         public int hashCode() {
-            return Objects.hash(mHandle,
+            return Objects.hash(mState,
+                            mHandle,
                             mHandlePresentation,
                             mCallerDisplayName,
                             mCallerDisplayNamePresentation,
@@ -1109,6 +1161,7 @@ public final class Call {
 
         /** {@hide} */
         public Details(
+                @CallState int state,
                 String telecomCallId,
                 Uri handle,
                 int handlePresentation,
@@ -1128,6 +1181,7 @@ public final class Call {
                 String contactDisplayName,
                 int callDirection,
                 int callerNumberVerificationStatus) {
+            mState = state;
             mTelecomCallId = telecomCallId;
             mHandle = handle;
             mHandlePresentation = handlePresentation;
@@ -1152,6 +1206,7 @@ public final class Call {
         /** {@hide} */
         public static Details createFromParcelableCall(ParcelableCall parcelableCall) {
             return new Details(
+                    parcelableCall.getState(),
                     parcelableCall.getId(),
                     parcelableCall.getHandle(),
                     parcelableCall.getHandlePresentation(),
@@ -1178,6 +1233,8 @@ public final class Call {
             StringBuilder sb = new StringBuilder();
             sb.append("[id: ");
             sb.append(mTelecomCallId);
+            sb.append(", state: ");
+            sb.append(Call.stateToString(mState));
             sb.append(", pa: ");
             sb.append(mAccountHandle);
             sb.append(", hdl: ");
@@ -1294,7 +1351,7 @@ public final class Call {
          * @param call The {@code Call} invoking this method.
          * @param state The new state of the {@code Call}.
          */
-        public void onStateChanged(Call call, int state) {}
+        public void onStateChanged(Call call, @CallState int state) {}
 
         /**
          * Invoked when the parent of this {@code Call} has changed. See {@link #getParent()}.
@@ -1419,12 +1476,21 @@ public final class Call {
         /**
          * Invoked when the RTT session failed to initiate for some reason, including rejection
          * by the remote party.
+         * <p>
+         * This callback will ONLY be invoked to report a failure related to a user initiated
+         * session modification request (i.e. {@link Call#sendRttRequest()}).
+         * <p>
+         * If a call is initiated with {@link TelecomManager#EXTRA_START_CALL_WITH_RTT} specified,
+         * the availability of RTT can be determined by checking {@link Details#PROPERTY_RTT}
+         * once the call enters state {@link Details#STATE_ACTIVE}.
+         *
          * @param call The call which the RTT initiation failure occurred on.
          * @param reason One of the status codes defined in
-         *               {@link android.telecom.Connection.RttModifyStatus}, with the exception of
-         *               {@link android.telecom.Connection.RttModifyStatus#SESSION_MODIFY_REQUEST_SUCCESS}.
+         *      {@link android.telecom.Connection.RttModifyStatus}, with the exception of
+         *      {@link android.telecom.Connection.RttModifyStatus#SESSION_MODIFY_REQUEST_SUCCESS}.
          */
-        public void onRttInitiationFailure(Call call, int reason) {}
+        public void onRttInitiationFailure(Call call,
+                @android.telecom.Connection.RttModifyStatus.RttSessionModifyStatus int reason) {}
 
         /**
          * Invoked when Call handover from one {@link PhoneAccount} to other {@link PhoneAccount}
@@ -2163,9 +2229,11 @@ public final class Call {
     /**
      * Obtains the state of this {@code Call}.
      *
-     * @return A state value, chosen from the {@code STATE_*} constants.
+     * @return The call state.
+     * @deprecated The call state is available via {@link Call.Details#getState()}.
      */
-    public int getState() {
+    @Deprecated
+    public @CallState int getState() {
         return mState;
     }
 
@@ -2493,6 +2561,7 @@ public final class Call {
         } else if (mRttCall != null && parcelableCall.getParcelableRttCall() == null
                 && parcelableCall.getIsRttCallChanged()) {
             isRttChanged = true;
+            mRttCall.close();
             mRttCall = null;
         }
 
@@ -2543,6 +2612,30 @@ public final class Call {
     final void internalSetDisconnected() {
         if (mState != Call.STATE_DISCONNECTED) {
             mState = Call.STATE_DISCONNECTED;
+            if (mDetails != null) {
+                mDetails = new Details(mState,
+                        mDetails.getTelecomCallId(),
+                        mDetails.getHandle(),
+                        mDetails.getHandlePresentation(),
+                        mDetails.getCallerDisplayName(),
+                        mDetails.getCallerDisplayNamePresentation(),
+                        mDetails.getAccountHandle(),
+                        mDetails.getCallCapabilities(),
+                        mDetails.getCallProperties(),
+                        mDetails.getDisconnectCause(),
+                        mDetails.getConnectTimeMillis(),
+                        mDetails.getGatewayInfo(),
+                        mDetails.getVideoState(),
+                        mDetails.getStatusHints(),
+                        mDetails.getExtras(),
+                        mDetails.getIntentExtras(),
+                        mDetails.getCreationTimeMillis(),
+                        mDetails.getContactDisplayName(),
+                        mDetails.getCallDirection(),
+                        mDetails.getCallerNumberVerificationStatus()
+                        );
+                fireDetailsChanged(mDetails);
+            }
             fireStateChanged(mState);
             fireCallDestroyed();
         }
@@ -2802,7 +2895,19 @@ public final class Call {
             if (key != null) {
                 final Object value = bundle.get(key);
                 final Object newValue = newBundle.get(key);
-                if (!Objects.equals(value, newValue)) {
+                if (!newBundle.containsKey(key)) {
+                    return false;
+                }
+                if (value instanceof Bundle && newValue instanceof Bundle) {
+                    if (!areBundlesEqual((Bundle) value, (Bundle) newValue)) {
+                        return false;
+                    }
+                }
+                if (value instanceof byte[] && newValue instanceof byte[]) {
+                    if (!Arrays.equals((byte[]) value, (byte[]) newValue)) {
+                        return false;
+                    }
+                } else if (!Objects.equals(value, newValue)) {
                     return false;
                 }
             }

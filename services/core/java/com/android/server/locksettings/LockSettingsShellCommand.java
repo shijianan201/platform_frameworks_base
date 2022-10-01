@@ -16,16 +16,16 @@
 
 package com.android.server.locksettings;
 
-import static android.app.admin.DevicePolicyManager.PASSWORD_COMPLEXITY_NONE;
-
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_NONE;
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_PATTERN;
+import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN;
 
 import android.app.ActivityManager;
 import android.app.admin.PasswordMetrics;
 import android.content.Context;
 import android.os.ShellCommand;
 import android.os.SystemProperties;
+import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.Slog;
 
@@ -50,6 +50,8 @@ class LockSettingsShellCommand extends ShellCommand {
     private static final String COMMAND_REMOVE_CACHE = "remove-cache";
     private static final String COMMAND_SET_ROR_PROVIDER_PACKAGE =
             "set-resume-on-reboot-provider-package";
+    private static final String COMMAND_REQUIRE_STRONG_AUTH =
+            "require-strong-auth";
     private static final String COMMAND_HELP = "help";
 
     private int mCurrentUserId;
@@ -98,6 +100,9 @@ class LockSettingsShellCommand extends ShellCommand {
                     return 0;
                 case COMMAND_SET_ROR_PROVIDER_PACKAGE:
                     runSetResumeOnRebootProviderPackage();
+                    return 0;
+                case COMMAND_REQUIRE_STRONG_AUTH:
+                    runRequireStrongAuth();
                     return 0;
                 case COMMAND_HELP:
                     onHelp();
@@ -172,7 +177,7 @@ class LockSettingsShellCommand extends ShellCommand {
             pw.println("  set-pin [--old <CREDENTIAL>] [--user USER_ID] <PIN>");
             pw.println("    Sets the lock screen as PIN, using the given PIN to unlock.");
             pw.println("");
-            pw.println("  set-pin [--old <CREDENTIAL>] [--user USER_ID] <PASSWORD>");
+            pw.println("  set-password [--old <CREDENTIAL>] [--user USER_ID] <PASSWORD>");
             pw.println("    Sets the lock screen as password, using the given PASSOWRD to unlock.");
             pw.println("");
             pw.println("  sp [--old <CREDENTIAL>] [--user USER_ID]");
@@ -193,6 +198,10 @@ class LockSettingsShellCommand extends ShellCommand {
             pw.println("  set-resume-on-reboot-provider-package <package_name>");
             pw.println("    Sets the package name for server based resume on reboot service "
                     + "provider.");
+            pw.println("");
+            pw.println("  require-strong-auth [--user USER_ID] <reason>");
+            pw.println("    Requires the strong authentication. The current supported reasons: "
+                    + "STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN.");
             pw.println("");
         }
     }
@@ -290,6 +299,24 @@ class LockSettingsShellCommand extends ShellCommand {
         return true;
     }
 
+    private boolean runRequireStrongAuth() {
+        final String reason = mNew;
+        int strongAuthReason;
+        switch (reason) {
+            case "STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN":
+                strongAuthReason = STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN;
+                mCurrentUserId = UserHandle.USER_ALL;
+                break;
+            default:
+                getErrPrintWriter().println("Unsupported reason: " + reason);
+                return false;
+        }
+        mLockPatternUtils.requireStrongAuth(strongAuthReason, mCurrentUserId);
+        getOutPrintWriter().println("Require strong auth for USER_ID "
+                + mCurrentUserId + " because of " + mNew);
+        return true;
+    }
+
     private boolean runClear() {
         LockscreenCredential none = LockscreenCredential.createNone();
         if (!isNewCredentialSufficient(none)) {
@@ -303,15 +330,17 @@ class LockSettingsShellCommand extends ShellCommand {
     private boolean isNewCredentialSufficient(LockscreenCredential credential) {
         final PasswordMetrics requiredMetrics =
                 mLockPatternUtils.getRequestedPasswordMetrics(mCurrentUserId);
+        final int requiredComplexity =
+                mLockPatternUtils.getRequestedPasswordComplexity(mCurrentUserId);
         final List<PasswordValidationError> errors;
         if (credential.isPassword() || credential.isPin()) {
-            errors = PasswordMetrics.validatePassword(requiredMetrics, PASSWORD_COMPLEXITY_NONE,
+            errors = PasswordMetrics.validatePassword(requiredMetrics, requiredComplexity,
                     credential.isPin(), credential.getCredential());
         } else {
             PasswordMetrics metrics = new PasswordMetrics(
                     credential.isPattern() ? CREDENTIAL_TYPE_PATTERN : CREDENTIAL_TYPE_NONE);
             errors = PasswordMetrics.validatePasswordMetrics(
-                    requiredMetrics, PASSWORD_COMPLEXITY_NONE, false /* isPin */, metrics);
+                    requiredMetrics, requiredComplexity, metrics);
         }
         if (!errors.isEmpty()) {
             getOutPrintWriter().println(

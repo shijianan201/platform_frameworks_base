@@ -10,7 +10,10 @@ package {
 android_test {
     name: "PackageManagerPerfTests",
 
-    srcs: ["src/**/*.java"],
+    srcs: [
+        "src/**/*.java",
+        "src/**/*.kt",
+    ],
 
     static_libs: [
         "platform-compat-test-rules",
@@ -19,6 +22,9 @@ android_test {
         "androidx.test.ext.junit",
         "androidx.annotation_annotation",
         "apct-perftests-utils",
+        "collector-device-lib-platform",
+        "cts-install-lib-java",
+        "services.core",
     ],
 
     libs: ["android.test.base"],
@@ -26,5 +32,9 @@ android_test {
     platform_apis: true,
 
     test_suites: ["device-tests"],
+
+    data: [":perfetto_artifacts"],
+
+    certificate: "platform",
 
 }

@@ -199,8 +199,9 @@ public abstract class ImsFeature {
          * {@link MmTelFeature.MmTelCapabilities#CAPABILITY_TYPE_UT}, or
          * {@link MmTelFeature.MmTelCapabilities#CAPABILITY_TYPE_SMS}.
          * @param radioTech The radio tech that this capability failed for, defined as
-         * {@link ImsRegistrationImplBase#REGISTRATION_TECH_LTE} or
-         * {@link ImsRegistrationImplBase#REGISTRATION_TECH_IWLAN}.
+         * {@link ImsRegistrationImplBase#REGISTRATION_TECH_LTE},
+         * {@link ImsRegistrationImplBase#REGISTRATION_TECH_IWLAN} or
+         * {@link ImsRegistrationImplBase#REGISTRATION_TECH_CROSS_SIM}.
          * @param reason The reason this capability was unable to be changed, defined as
          * {@link #CAPABILITY_ERROR_GENERIC} or {@link #CAPABILITY_SUCCESS}.
          */
@@ -374,11 +375,15 @@ public abstract class ImsFeature {
      */
     @SystemApi
     public final void setFeatureState(@ImsState int state) {
+        boolean isNotify = false;
         synchronized (mLock) {
             if (mState != state) {
                 mState = state;
-                notifyFeatureState(state);
+                isNotify = true;
             }
+        }
+        if (isNotify) {
+            notifyFeatureState(state);
         }
     }
 
@@ -411,14 +416,16 @@ public abstract class ImsFeature {
      * Internal method called by ImsFeature when setFeatureState has changed.
      */
     private void notifyFeatureState(@ImsState int state) {
-        mStatusCallbacks.broadcastAction((c) -> {
-            try {
-                c.notifyImsFeatureStatus(state);
-            } catch (RemoteException e) {
-                Log.w(LOG_TAG, e + " notifyFeatureState() - Skipping "
-                        + "callback.");
-            }
-        });
+        synchronized (mStatusCallbacks) {
+            mStatusCallbacks.broadcastAction((c) -> {
+                try {
+                    c.notifyImsFeatureStatus(state);
+                } catch (RemoteException e) {
+                    Log.w(LOG_TAG, e + " notifyFeatureState() - Skipping "
+                            + "callback.");
+                }
+            });
+        }
     }
 
     /**
@@ -490,14 +497,19 @@ public abstract class ImsFeature {
         synchronized (mLock) {
             mCapabilityStatus = caps.copy();
         }
-        mCapabilityCallbacks.broadcastAction((callback) -> {
-            try {
-                callback.onCapabilitiesStatusChanged(caps.mCapabilities);
-            } catch (RemoteException e) {
-                Log.w(LOG_TAG, e + " notifyCapabilitiesStatusChanged() - Skipping "
-                        + "callback.");
-            }
-        });
+
+        synchronized (mCapabilityCallbacks) {
+            mCapabilityCallbacks.broadcastAction((callback) -> {
+                try {
+                    Log.d(LOG_TAG, "ImsFeature notifyCapabilitiesStatusChanged Capabilities = "
+                            + caps.mCapabilities);
+                    callback.onCapabilitiesStatusChanged(caps.mCapabilities);
+                } catch (RemoteException e) {
+                    Log.w(LOG_TAG, e + " notifyCapabilitiesStatusChanged() - Skipping "
+                            + "callback.");
+                }
+            });
+        }
     }
 
     /**

@@ -184,6 +184,21 @@ public abstract class PowerManagerInternal {
 
     public abstract void setDeviceIdleTempWhitelist(int[] appids);
 
+    /**
+     * Updates the Low Power Standby allowlist.
+     *
+     * @param uids UIDs that are exempt from Low Power Standby restrictions
+     */
+    public abstract void setLowPowerStandbyAllowlist(int[] uids);
+
+    /**
+     * Used by LowPowerStandbyController to notify the power manager that Low Power Standby's
+     * active state has changed.
+     *
+     * @param active {@code true} to activate Low Power Standby, {@code false} to turn it off.
+     */
+    public abstract void setLowPowerStandbyActive(boolean active);
+
     public abstract void startUidChanges();
 
     public abstract void finishUidChanges();
@@ -195,12 +210,6 @@ public abstract class PowerManagerInternal {
     public abstract void uidActive(int uid);
 
     public abstract void uidIdle(int uid);
-
-    /**
-     * The hintId sent through this method should be in-line with the
-     * PowerHint defined in android/hardware/power/<version 1.0 & up>/IPower.h
-     */
-    public abstract void powerHint(int hintId, int data);
 
     /**
      * Boost: It is sent when user interacting with the device, for example,
@@ -320,6 +329,9 @@ public abstract class PowerManagerInternal {
 
     /** Returns information about the last wakeup event. */
     public abstract PowerManager.WakeData getLastWakeup();
+
+    /** Returns information about the last event to go to sleep. */
+    public abstract PowerManager.SleepData getLastGoToSleep();
 
     /** Allows power button to intercept a power key button press. */
     public abstract boolean interceptPowerKeyDown(KeyEvent event);

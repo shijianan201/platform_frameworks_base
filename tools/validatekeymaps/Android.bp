@@ -21,6 +21,7 @@ cc_binary_host {
     cflags: [
         "-Wall",
         "-Werror",
+        "-Wextra",
     ],
 
     static_libs: [
@@ -29,12 +30,24 @@ cc_binary_host {
         "libutils",
         "libcutils",
         "liblog",
+        "libui-types",
     ],
+    shared_libs: [
+        "libvintf",
+    ],
+    target: {
+        host_linux: {
+            static_libs: [
+                // libbinder is only available for linux
+                "libbinder",
+            ],
+        },
+    },
 
     // This tool is prebuilt if we're doing an app-only build.
     product_variables: {
         unbundled_build: {
-          enabled: false,
+            enabled: false,
         },
     },
 }

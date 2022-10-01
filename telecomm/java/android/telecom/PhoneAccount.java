@@ -27,6 +27,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.telephony.CarrierConfigManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 
@@ -283,10 +284,13 @@ public final class PhoneAccount implements Parcelable {
      * number relies on presence.  Should only be set if the {@code PhoneAccount} also has
      * {@link #CAPABILITY_VIDEO_CALLING}.
      * <p>
-     * When set, the {@link ConnectionService} is responsible for toggling the
+     * Note: As of Android 12, using the
      * {@link android.provider.ContactsContract.Data#CARRIER_PRESENCE_VT_CAPABLE} bit on the
      * {@link android.provider.ContactsContract.Data#CARRIER_PRESENCE} column to indicate whether
-     * a contact's phone number supports video calling.
+     * a contact's phone number supports video calling has been deprecated and should only be used
+     * on devices where {@link CarrierConfigManager#KEY_USE_RCS_PRESENCE_BOOL} is set. On newer
+     * devices, applications must use {@link android.telephony.ims.RcsUceAdapter} instead to
+     * determine whether or not a contact's phone number supports carrier video calling.
      * <p>
      * See {@link #getCapabilities}
      */
@@ -376,7 +380,45 @@ public final class PhoneAccount implements Parcelable {
      */
     public static final int CAPABILITY_CALL_COMPOSER = 0x8000;
 
-    /* NEXT CAPABILITY: 0x10000 */
+    /**
+     * Flag indicating that this {@link PhoneAccount} provides SIM-based voice calls, potentially as
+     * an over-the-top solution such as wi-fi calling.
+     *
+     * <p>Similar to {@link #CAPABILITY_SUPPORTS_VIDEO_CALLING}, this capability indicates this
+     * {@link PhoneAccount} has the ability to make voice calls (but not necessarily at this time).
+     * Whether this {@link PhoneAccount} can make a voice call is ultimately controlled by {@link
+     * #CAPABILITY_VOICE_CALLING_AVAILABLE}, which indicates whether this {@link PhoneAccount} is
+     * currently capable of making a voice call. Consider a case where, for example, a {@link
+     * PhoneAccount} supports making voice calls (e.g. {@link
+     * #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS}), but a current lack of network connectivity
+     * prevents voice calls from being made (e.g. {@link #CAPABILITY_VOICE_CALLING_AVAILABLE}).
+     *
+     * <p>In order to declare this capability, this {@link PhoneAccount} must also declare {@link
+     * #CAPABILITY_SIM_SUBSCRIPTION} or {@link #CAPABILITY_CONNECTION_MANAGER} and satisfy the
+     * associated requirements.
+     *
+     * @see #CAPABILITY_VOICE_CALLING_AVAILABLE
+     * @see #getCapabilities
+     */
+    public static final int CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS = 0x10000;
+
+    /**
+     * Flag indicating that this {@link PhoneAccount} is <em>currently</em> able to place SIM-based
+     * voice calls, similar to {@link #CAPABILITY_VIDEO_CALLING}.
+     *
+     * <p>See also {@link #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS}, which indicates whether
+     * the {@code PhoneAccount} supports placing SIM-based voice calls or not.
+     *
+     * <p>In order to declare this capability, this {@link PhoneAccount} must also declare {@link
+     * #CAPABILITY_SIM_SUBSCRIPTION} or {@link #CAPABILITY_CONNECTION_MANAGER} and satisfy the
+     * associated requirements.
+     *
+     * @see #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS
+     * @see #getCapabilities
+     */
+    public static final int CAPABILITY_VOICE_CALLING_AVAILABLE = 0x20000;
+
+    /* NEXT CAPABILITY: 0x40000 */
 
     /**
      * URI scheme for telephone number URIs.
@@ -1098,13 +1140,19 @@ public final class PhoneAccount implements Parcelable {
             sb.append("SimSub ");
         }
         if (hasCapabilities(CAPABILITY_RTT)) {
-            sb.append("Rtt");
+            sb.append("Rtt ");
         }
         if (hasCapabilities(CAPABILITY_ADHOC_CONFERENCE_CALLING)) {
-            sb.append("AdhocConf");
+            sb.append("AdhocConf ");
         }
         if (hasCapabilities(CAPABILITY_CALL_COMPOSER)) {
             sb.append("CallComposer ");
+        }
+        if (hasCapabilities(CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS)) {
+            sb.append("SuppVoice ");
+        }
+        if (hasCapabilities(CAPABILITY_VOICE_CALLING_AVAILABLE)) {
+            sb.append("Voice ");
         }
         return sb.toString();
     }

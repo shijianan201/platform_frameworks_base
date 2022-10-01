@@ -23,6 +23,8 @@ import static com.android.server.pm.dex.PackageDexUsage.PackageUseInfo;
 
 import static java.util.function.Function.identity;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
@@ -33,6 +35,7 @@ import android.os.BatteryManager;
 import android.os.FileUtils;
 import android.os.PowerManager;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.storage.StorageManager;
@@ -86,6 +89,11 @@ public class DexManager {
     // However it can load verification data - thus we pick the "verify" compiler filter.
     private static final String SYSTEM_SERVER_COMPILER_FILTER = "verify";
 
+    // The suffix we add to the package name when the loading happens in an isolated process.
+    // Note that the double dot creates and "invalid" package name which makes it clear that this
+    // is an artificially constructed name.
+    private static final String ISOLATED_PROCESS_PACKAGE_SUFFIX = "..isolated";
+
     private final Context mContext;
 
     // Maps package name to code locations.
@@ -104,7 +112,7 @@ public class DexManager {
     // record class loaders or ISAs.)
     private final DynamicCodeLogger mDynamicCodeLogger;
 
-    private final IPackageManager mPackageManager;
+    private IPackageManager mPackageManager;
     private final PackageDexOptimizer mPackageDexOptimizer;
     private final Object mInstallLock;
     @GuardedBy("mInstallLock")
@@ -123,16 +131,22 @@ public class DexManager {
     private static int DEX_SEARCH_FOUND_SPLIT = 2;  // dex file is a split apk
     private static int DEX_SEARCH_FOUND_SECONDARY = 3;  // dex file is a secondary dex
 
-    public DexManager(Context context, IPackageManager pms, PackageDexOptimizer pdo,
-            Installer installer, Object installLock) {
+    public DexManager(Context context, PackageDexOptimizer pdo, Installer installer,
+            Object installLock) {
+        this(context, pdo, installer, installLock, null);
+    }
+
+    @VisibleForTesting
+    public DexManager(Context context, PackageDexOptimizer pdo, Installer installer,
+            Object installLock, @Nullable IPackageManager packageManager) {
         mContext = context;
         mPackageCodeLocationsCache = new HashMap<>();
         mPackageDexUsage = new PackageDexUsage();
-        mPackageManager = pms;
         mPackageDexOptimizer = pdo;
         mInstaller = installer;
         mInstallLock = installLock;
-        mDynamicCodeLogger = new DynamicCodeLogger(pms, installer);
+        mDynamicCodeLogger = new DynamicCodeLogger(installer);
+        mPackageManager = packageManager;
 
         // This is currently checked to handle tests that pass in a null context.
         // TODO(b/174783329): Modify the tests to pass in a mocked Context, PowerManager,
@@ -152,6 +166,15 @@ public class DexManager {
         }
     }
 
+    @NonNull
+    private IPackageManager getPackageManager() {
+        if (mPackageManager == null) {
+            mPackageManager = IPackageManager.Stub.asInterface(
+                    ServiceManager.getService("package"));
+        }
+        return mPackageManager;
+    }
+
     public DynamicCodeLogger getDynamicCodeLogger() {
         return mDynamicCodeLogger;
     }
@@ -166,12 +189,14 @@ public class DexManager {
      *     the class loader context that was used to load them.
      * @param loaderIsa the ISA of the app loading the dex files
      * @param loaderUserId the user id which runs the code loading the dex files
+     * @param loaderIsIsolatedProcess whether or not the loading process is isolated.
      */
     public void notifyDexLoad(ApplicationInfo loadingAppInfo,
-            Map<String, String> classLoaderContextMap, String loaderIsa, int loaderUserId) {
+            Map<String, String> classLoaderContextMap, String loaderIsa, int loaderUserId,
+            boolean loaderIsIsolatedProcess) {
         try {
             notifyDexLoadInternal(loadingAppInfo, classLoaderContextMap, loaderIsa,
-                    loaderUserId);
+                    loaderUserId, loaderIsIsolatedProcess);
         } catch (Exception e) {
             Slog.w(TAG, "Exception while notifying dex load for package " +
                     loadingAppInfo.packageName, e);
@@ -181,7 +206,7 @@ public class DexManager {
     @VisibleForTesting
     /*package*/ void notifyDexLoadInternal(ApplicationInfo loadingAppInfo,
             Map<String, String> classLoaderContextMap, String loaderIsa,
-            int loaderUserId) {
+            int loaderUserId, boolean loaderIsIsolatedProcess) {
         if (classLoaderContextMap == null) {
             return;
         }
@@ -195,22 +220,36 @@ public class DexManager {
             return;
         }
 
+        // If this load is coming from an isolated process we need to be able to prevent profile
+        // based optimizations. This is because isolated processes are sandboxed and can only read
+        // world readable files, so they need world readable optimization files. An
+        // example of such a package is webview.
+        //
+        // In order to prevent profile optimization we pretend that the load is coming from a
+        // different package, and so we assign a artificial name to the loading package making it
+        // clear that it comes from an isolated process. This blends well with the entire
+        // usedByOthers logic without needing to special handle isolated process in all dexopt
+        // layers.
+        String loadingPackageAmendedName = loadingAppInfo.packageName;
+        if (loaderIsIsolatedProcess) {
+            loadingPackageAmendedName += ISOLATED_PROCESS_PACKAGE_SUFFIX;
+        }
         for (Map.Entry<String, String> mapping : classLoaderContextMap.entrySet()) {
             String dexPath = mapping.getKey();
             // Find the owning package name.
             DexSearchResult searchResult = getDexPackage(loadingAppInfo, dexPath, loaderUserId);
 
             if (DEBUG) {
-                Slog.i(TAG, loadingAppInfo.packageName
-                    + " loads from " + searchResult + " : " + loaderUserId + " : " + dexPath);
+                Slog.i(TAG, loadingPackageAmendedName
+                        + " loads from " + searchResult + " : " + loaderUserId + " : " + dexPath);
             }
 
             if (searchResult.mOutcome != DEX_SEARCH_NOT_FOUND) {
                 // TODO(calin): extend isUsedByOtherApps check to detect the cases where
                 // different apps share the same runtime. In that case we should not mark the dex
                 // file as isUsedByOtherApps. Currently this is a safe approximation.
-                boolean isUsedByOtherApps = !loadingAppInfo.packageName.equals(
-                        searchResult.mOwningPackageName);
+                boolean isUsedByOtherApps =
+                        !loadingPackageAmendedName.equals(searchResult.mOwningPackageName);
                 boolean primaryOrSplit = searchResult.mOutcome == DEX_SEARCH_FOUND_PRIMARY ||
                         searchResult.mOutcome == DEX_SEARCH_FOUND_SPLIT;
 
@@ -249,7 +288,7 @@ public class DexManager {
                     // async write to disk to make sure we don't loose the data in case of a reboot.
                     if (mPackageDexUsage.record(searchResult.mOwningPackageName,
                             dexPath, loaderUserId, loaderIsa, primaryOrSplit,
-                            loadingAppInfo.packageName, classLoaderContext, overwriteCLC)) {
+                            loadingPackageAmendedName, classLoaderContext, overwriteCLC)) {
                         mPackageDexUsage.maybeWriteAsync();
                     }
                 }
@@ -508,7 +547,7 @@ public class DexManager {
 
             PackageInfo pkg;
             try {
-                pkg = mPackageManager.getPackageInfo(packageName, /*flags*/0,
+                pkg = getPackageManager().getPackageInfo(packageName, /*flags*/0,
                     dexUseInfo.getOwnerUserId());
             } catch (RemoteException e) {
                 throw new AssertionError(e);
@@ -652,7 +691,7 @@ public class DexManager {
                 // to get back the real app uid and its storage kind. These are only used
                 // to perform extra validation in installd.
                 // TODO(calin): maybe a bit overkill.
-                pkg = mPackageManager.getPackageInfo(packageName, /*flags*/0,
+                pkg = getPackageManager().getPackageInfo(packageName, /*flags*/0,
                     dexUseInfo.getOwnerUserId());
             } catch (RemoteException ignore) {
                 // Can't happen, DexManager is local.
@@ -749,7 +788,7 @@ public class DexManager {
                     dexPath, userId, isa, /*primaryOrSplit*/ false,
                     loadingPackage,
                     PackageDexUsage.VARIABLE_CLASS_LOADER_CONTEXT,
-                    /*overwriteCLC*/ false);
+                    /*overwriteCLC=*/ false);
             update |= newUpdate;
         }
         if (update) {
@@ -1013,18 +1052,28 @@ public class DexManager {
 
     /**
      * Deletes all the optimizations files generated by ART.
+     * This is best effort, and the method will log but not throw errors
+     * for individual deletes
+     *
      * @param packageInfo the package information.
+     * @return the number of freed bytes or -1 if there was an error in the process.
      */
-    public void deleteOptimizedFiles(ArtPackageInfo packageInfo) {
+    public long deleteOptimizedFiles(ArtPackageInfo packageInfo) {
+        long freedBytes = 0;
+        boolean hadErrors = false;
+        final String packageName = packageInfo.getPackageName();
         for (String codePath : packageInfo.getCodePaths()) {
             for (String isa : packageInfo.getInstructionSets()) {
                 try {
-                    mInstaller.deleteOdex(codePath, isa, packageInfo.getOatDir());
+                    freedBytes += mInstaller.deleteOdex(packageName, codePath, isa,
+                            packageInfo.getOatDir());
                 } catch (InstallerException e) {
                     Log.e(TAG, "Failed deleting oat files for " + codePath, e);
+                    hadErrors = true;
                 }
             }
         }
+        return hadErrors ? -1 : freedBytes;
     }
 
     public static class RegisterDexModuleResult {

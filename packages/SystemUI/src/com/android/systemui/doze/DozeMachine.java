@@ -28,6 +28,8 @@ import android.view.Display;
 
 import com.android.internal.util.Preconditions;
 import com.android.systemui.dock.DockManager;
+import com.android.systemui.doze.dagger.DozeScope;
+import com.android.systemui.doze.dagger.WrappedService;
 import com.android.systemui.keyguard.WakefulnessLifecycle;
 import com.android.systemui.keyguard.WakefulnessLifecycle.Wakefulness;
 import com.android.systemui.statusbar.phone.DozeParameters;
@@ -38,6 +40,8 @@ import com.android.systemui.util.wakelock.WakeLock;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 
+import javax.inject.Inject;
+
 /**
  * Orchestrates all things doze.
  *
@@ -46,6 +50,7 @@ import java.util.ArrayList;
  *
  * During state transitions and in certain states, DozeMachine holds a wake lock.
  */
+@DozeScope
 public class DozeMachine {
 
     static final String TAG = "DozeMachine";
@@ -113,9 +118,11 @@ public class DozeMachine {
             switch (this) {
                 case UNINITIALIZED:
                 case INITIALIZED:
-                case DOZE_REQUEST_PULSE:
                     return parameters.shouldControlScreenOff() ? Display.STATE_ON
                             : Display.STATE_OFF;
+                case DOZE_REQUEST_PULSE:
+                    return parameters.getDisplayNeedsBlanking() ? Display.STATE_OFF
+                            : Display.STATE_ON;
                 case DOZE_AOD_PAUSED:
                 case DOZE:
                     return Display.STATE_OFF;
@@ -146,9 +153,11 @@ public class DozeMachine {
     private boolean mWakeLockHeldForCurrentState = false;
     private DockManager mDockManager;
 
-    public DozeMachine(Service service, AmbientDisplayConfiguration config, WakeLock wakeLock,
-            WakefulnessLifecycle wakefulnessLifecycle, BatteryController batteryController,
-            DozeLog dozeLog, DockManager dockManager, DozeHost dozeHost) {
+    @Inject
+    public DozeMachine(@WrappedService Service service, AmbientDisplayConfiguration config,
+            WakeLock wakeLock, WakefulnessLifecycle wakefulnessLifecycle,
+            BatteryController batteryController, DozeLog dozeLog, DockManager dockManager,
+            DozeHost dozeHost, Part[] parts) {
         mDozeService = service;
         mConfig = config;
         mWakefulnessLifecycle = wakefulnessLifecycle;
@@ -157,6 +166,10 @@ public class DozeMachine {
         mDozeLog = dozeLog;
         mDockManager = dockManager;
         mDozeHost = dozeHost;
+        mParts = parts;
+        for (Part part : parts) {
+            part.setDozeMachine(this);
+        }
     }
 
     /**
@@ -166,12 +179,6 @@ public class DozeMachine {
         for (Part part : mParts) {
             part.destroy();
         }
-    }
-
-    /** Initializes the set of {@link Part}s. Must be called exactly once after construction. */
-    public void setParts(Part[] parts) {
-        Preconditions.checkState(mParts == null);
-        mParts = parts;
     }
 
     /**
@@ -200,6 +207,7 @@ public class DozeMachine {
     }
 
     void onScreenState(int state) {
+        mDozeLog.traceDisplayState(state);
         for (Part part : mParts) {
             part.onScreenState(state);
         }
@@ -303,6 +311,7 @@ public class DozeMachine {
         for (Part p : mParts) {
             p.transitionTo(oldState, newState);
         }
+        mDozeLog.traceDozeStateSendComplete(newState);
 
         switch (newState) {
             case FINISH:
@@ -348,9 +357,14 @@ public class DozeMachine {
         if (mState == State.FINISH) {
             return State.FINISH;
         }
-        if (mDozeHost.isDozeSuppressed() && requestedState.isAlwaysOn()) {
-            Log.i(TAG, "Doze is suppressed. Suppressing state: " + requestedState);
-            mDozeLog.traceDozeSuppressed(requestedState);
+        if (mDozeHost.isAlwaysOnSuppressed() && requestedState.isAlwaysOn()) {
+            Log.i(TAG, "Doze is suppressed by an app. Suppressing state: " + requestedState);
+            mDozeLog.traceAlwaysOnSuppressed(requestedState, "app");
+            return State.DOZE;
+        }
+        if (mDozeHost.isPowerSaveActive() && requestedState.isAlwaysOn()) {
+            Log.i(TAG, "Doze is suppressed by battery saver. Suppressing state: " + requestedState);
+            mDozeLog.traceAlwaysOnSuppressed(requestedState, "batterySaver");
             return State.DOZE;
         }
         if ((mState == State.DOZE_AOD_PAUSED || mState == State.DOZE_AOD_PAUSING
@@ -358,9 +372,6 @@ public class DozeMachine {
                 || mState == State.DOZE_AOD_DOCKED) && requestedState == State.DOZE_PULSE_DONE) {
             Log.i(TAG, "Dropping pulse done because current state is already done: " + mState);
             return mState;
-        }
-        if (requestedState == State.DOZE_AOD && mBatteryController.isAodPowerSave()) {
-            return State.DOZE;
         }
         if (requestedState == State.DOZE_REQUEST_PULSE && !mState.canPulse()) {
             Log.i(TAG, "Dropping pulse request because current state can't pulse: " + mState);
@@ -436,6 +447,9 @@ public class DozeMachine {
          *  be accurate nor match with the new displayState.
          */
         default void onScreenState(int displayState) {}
+
+        /** Sets the {@link DozeMachine} when this Part is associated with one. */
+        default void setDozeMachine(DozeMachine dozeMachine) {}
     }
 
     /** A wrapper interface for {@link android.service.dreams.DreamService} */

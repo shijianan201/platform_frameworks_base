@@ -235,9 +235,7 @@ void android_os_Process_setThreadGroupAndCpuset(JNIEnv* env, jobject clazz, int 
 void android_os_Process_setProcessGroup(JNIEnv* env, jobject clazz, int pid, jint grp)
 {
     ALOGV("%s pid=%d grp=%" PRId32, __func__, pid, grp);
-    DIR *d;
     char proc_path[255];
-    struct dirent *de;
 
     if (!verifyGroup(env, grp)) {
         return;
@@ -248,10 +246,8 @@ void android_os_Process_setProcessGroup(JNIEnv* env, jobject clazz, int pid, jin
         return;
     }
 
-    bool isDefault = false;
     if (grp < 0) {
         grp = SP_FOREGROUND;
-        isDefault = true;
     }
 
     if (kDebugPolicy) {
@@ -263,8 +259,12 @@ void android_os_Process_setProcessGroup(JNIEnv* env, jobject clazz, int pid, jin
         sprintf(proc_path, "/proc/%d/cmdline", pid);
         fd = open(proc_path, O_RDONLY | O_CLOEXEC);
         if (fd >= 0) {
-            int rc = read(fd, cmdline, sizeof(cmdline)-1);
-            cmdline[rc] = 0;
+            ssize_t rc = read(fd, cmdline, sizeof(cmdline) - 1);
+            if (rc < 0) {
+                ALOGE("read /proc/%d/cmdline (%s)", pid, strerror(errno));
+            } else {
+                cmdline[rc] = 0;
+            }
             close(fd);
         }
 
@@ -275,60 +275,8 @@ void android_os_Process_setProcessGroup(JNIEnv* env, jobject clazz, int pid, jin
         }
     }
 
-    sprintf(proc_path, "/proc/%d/task", pid);
-    if (!(d = opendir(proc_path))) {
-        // If the process exited on us, don't generate an exception
-        if (errno != ENOENT)
-            signalExceptionForGroupError(env, errno, pid);
-        return;
-    }
-
-    while ((de = readdir(d))) {
-        int t_pid;
-        int t_pri;
-        int err;
-
-        if (de->d_name[0] == '.')
-            continue;
-        t_pid = atoi(de->d_name);
-
-        if (!t_pid) {
-            ALOGE("Error getting pid for '%s'\n", de->d_name);
-            continue;
-        }
-
-        t_pri = getpriority(PRIO_PROCESS, t_pid);
-
-        if (t_pri <= ANDROID_PRIORITY_AUDIO) {
-            int scheduler = sched_getscheduler(t_pid) & ~SCHED_RESET_ON_FORK;
-            if ((scheduler == SCHED_FIFO) || (scheduler == SCHED_RR)) {
-                // This task wants to stay in its current audio group so it can keep its budget
-                // don't update its cpuset or cgroup
-                continue;
-            }
-        }
-
-        if (isDefault) {
-            if (t_pri >= ANDROID_PRIORITY_BACKGROUND) {
-                // This task wants to stay at background
-                // update its cpuset so it doesn't only run on bg core(s)
-                err = SetTaskProfiles(t_pid, {get_cpuset_policy_profile_name((SchedPolicy)grp)}, true) ? 0 : -1;
-                if (err != NO_ERROR) {
-                    signalExceptionForGroupError(env, -err, t_pid);
-                    break;
-                }
-                continue;
-            }
-        }
-
-        err = SetTaskProfiles(t_pid, {get_cpuset_policy_profile_name((SchedPolicy)grp)}, true) ? 0 : -1;
-        if (err != NO_ERROR) {
-            signalExceptionForGroupError(env, -err, t_pid);
-            break;
-        }
-
-    }
-    closedir(d);
+    if (!SetProcessProfilesCached(0, pid, {get_cpuset_policy_profile_name((SchedPolicy)grp)}))
+        signalExceptionForGroupError(env, errno ? errno : EPERM, pid);
 }
 
 void android_os_Process_setProcessFrozen(
@@ -354,6 +302,10 @@ jint android_os_Process_getProcessGroup(JNIEnv* env, jobject clazz, jint pid)
         signalExceptionForGroupError(env, errno, pid);
     }
     return (int) sp;
+}
+
+jint android_os_Process_createProcessGroup(JNIEnv* env, jobject clazz, jint uid, jint pid) {
+    return createProcessGroup(uid, pid);
 }
 
 /** Sample CPUset list format:
@@ -961,7 +913,7 @@ jboolean android_os_Process_parseProcLineArray(JNIEnv* env, jobject clazz,
             end = i;
             i++;
         } else if ((mode&PROC_QUOTES) != 0) {
-            while (buffer[i] != '"' && i < endIndex) {
+            while (i < endIndex && buffer[i] != '"') {
                 i++;
             }
             end = i;
@@ -1313,9 +1265,10 @@ static const JNINativeMethod methods[] = {
         {"setThreadGroupAndCpuset", "(II)V", (void*)android_os_Process_setThreadGroupAndCpuset},
         {"setProcessGroup", "(II)V", (void*)android_os_Process_setProcessGroup},
         {"getProcessGroup", "(I)I", (void*)android_os_Process_getProcessGroup},
+        {"createProcessGroup", "(II)I", (void*)android_os_Process_createProcessGroup},
         {"getExclusiveCores", "()[I", (void*)android_os_Process_getExclusiveCores},
         {"setSwappiness", "(IZ)Z", (void*)android_os_Process_setSwappiness},
-        {"setArgV0", "(Ljava/lang/String;)V", (void*)android_os_Process_setArgV0},
+        {"setArgV0Native", "(Ljava/lang/String;)V", (void*)android_os_Process_setArgV0},
         {"setUid", "(I)I", (void*)android_os_Process_setUid},
         {"setGid", "(I)I", (void*)android_os_Process_setGid},
         {"sendSignal", "(II)V", (void*)android_os_Process_sendSignal},

@@ -26,7 +26,6 @@ import android.content.pm.ResolveInfo;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.PersistableBundle;
-import android.os.RemoteException;
 import android.os.SystemProperties;
 import android.telephony.TelephonyManager;
 
@@ -74,11 +73,6 @@ public final class TelephonyUtils {
         return cur == null ? Collections.emptyList() : cur;
     }
 
-    /** Throws a {@link RuntimeException} that wrapps the {@link RemoteException}. */
-    public static RuntimeException rethrowAsRuntimeException(RemoteException remoteException) {
-        throw new RuntimeException(remoteException);
-    }
-
     /**
      * Returns a {@link ComponentInfo} from the {@link ResolveInfo},
      * or throws an {@link IllegalStateException} if not available.
@@ -99,11 +93,30 @@ public final class TelephonyUtils {
      */
     public static void runWithCleanCallingIdentity(
             @NonNull Runnable action) {
-        long callingIdentity = Binder.clearCallingIdentity();
+        final long callingIdentity = Binder.clearCallingIdentity();
         try {
             action.run();
         } finally {
             Binder.restoreCallingIdentity(callingIdentity);
+        }
+    }
+
+    /**
+     * Convenience method for running the provided action in the provided
+     * executor enclosed in
+     * {@link Binder#clearCallingIdentity}/{@link Binder#restoreCallingIdentity}
+     *
+     * Any exception thrown by the given action will need to be handled by caller.
+     *
+     */
+    public static void runWithCleanCallingIdentity(
+            @NonNull Runnable action, @NonNull Executor executor) {
+        if (action != null) {
+            if (executor != null) {
+                executor.execute(() -> runWithCleanCallingIdentity(action));
+            } else {
+                runWithCleanCallingIdentity(action);
+            }
         }
     }
 
@@ -118,7 +131,7 @@ public final class TelephonyUtils {
      */
     public static <T> T runWithCleanCallingIdentity(
             @NonNull Supplier<T> action) {
-        long callingIdentity = Binder.clearCallingIdentity();
+        final long callingIdentity = Binder.clearCallingIdentity();
         try {
             return action.get();
         } finally {
@@ -173,6 +186,7 @@ public final class TelephonyUtils {
             case TelephonyManager.DATA_CONNECTED: return "CONNECTED";
             case TelephonyManager.DATA_SUSPENDED: return "SUSPENDED";
             case TelephonyManager.DATA_DISCONNECTING: return "DISCONNECTING";
+            case TelephonyManager.DATA_HANDOVER_IN_PROGRESS: return "HANDOVERINPROGRESS";
             case TelephonyManager.DATA_UNKNOWN: return "UNKNOWN";
         }
         // This is the error case. The well-defined value for UNKNOWN is -1.

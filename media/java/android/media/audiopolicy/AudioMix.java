@@ -218,7 +218,7 @@ public class AudioMix {
     /** @return an error string if the format would not allow Privileged playbackCapture
      *          null otherwise
      * @hide */
-    public static String canBeUsedForPrivilegedCapture(AudioFormat format) {
+    public static String canBeUsedForPrivilegedMediaCapture(AudioFormat format) {
         int sampleRate = format.getSampleRate();
         if (sampleRate > PRIVILEDGED_CAPTURE_MAX_SAMPLE_RATE || sampleRate <= 0) {
             return "Privileged audio capture sample rate " + sampleRate
@@ -238,6 +238,11 @@ public class AudioMix {
                    + PRIVILEDGED_CAPTURE_MAX_BYTES_PER_SAMPLE + " bytes per sample";
         }
         return null;
+    }
+
+    /** @hide */
+    public boolean isForCallRedirection() {
+        return mRule.isForCallRedirection();
     }
 
     /** @hide */
@@ -422,6 +427,20 @@ public class AudioMix {
                     rate = 44100;
                 }
                 mFormat = new AudioFormat.Builder().setSampleRate(rate).build();
+            } else {
+                // Ensure that 'mFormat' uses an output channel mask. Using an input channel
+                // mask was not made 'illegal' initially, however the framework code
+                // assumes usage in AudioMixes of output channel masks only (b/194910301).
+                if ((mFormat.getPropertySetMask()
+                                & AudioFormat.AUDIO_FORMAT_HAS_PROPERTY_CHANNEL_MASK) != 0) {
+                    if (mFormat.getChannelCount() == 1
+                            && mFormat.getChannelMask() == AudioFormat.CHANNEL_IN_MONO) {
+                        mFormat = new AudioFormat.Builder(mFormat).setChannelMask(
+                                AudioFormat.CHANNEL_OUT_MONO).build();
+                    }
+                    // CHANNEL_IN_STEREO == CHANNEL_OUT_STEREO so no need to correct.
+                    // CHANNEL_IN_FRONT_BACK is hidden, should not appear.
+                }
             }
             if ((mDeviceSystemType != AudioSystem.DEVICE_NONE)
                     && (mDeviceSystemType != AudioSystem.DEVICE_OUT_REMOTE_SUBMIX)
@@ -448,8 +467,8 @@ public class AudioMix {
                     }
                 }
             }
-            if (mRule.allowPrivilegedPlaybackCapture()) {
-                String error = AudioMix.canBeUsedForPrivilegedCapture(mFormat);
+            if (mRule.allowPrivilegedMediaPlaybackCapture()) {
+                String error = AudioMix.canBeUsedForPrivilegedMediaCapture(mFormat);
                 if (error != null) {
                     throw new IllegalArgumentException(error);
                 }

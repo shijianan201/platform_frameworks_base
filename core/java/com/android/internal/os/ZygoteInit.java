@@ -33,13 +33,11 @@ import android.os.IInstalld;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
-import android.os.ServiceSpecificException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.os.ZygoteProcess;
-import android.os.storage.StorageManager;
 import android.provider.DeviceConfig;
 import android.security.keystore2.AndroidKeyStoreProvider;
 import android.system.ErrnoException;
@@ -48,6 +46,7 @@ import android.system.OsConstants;
 import android.system.StructCapUserData;
 import android.system.StructCapUserHeader;
 import android.text.Hyphenator;
+import android.text.TextUtils;
 import android.util.EventLog;
 import android.util.Log;
 import android.util.Slog;
@@ -58,7 +57,6 @@ import android.widget.TextView;
 import com.android.internal.util.FrameworkStatsLog;
 import com.android.internal.util.Preconditions;
 
-import dalvik.system.DexFile;
 import dalvik.system.VMRuntime;
 import dalvik.system.ZygoteHooks;
 
@@ -127,6 +125,12 @@ public class ZygoteInit {
 
     private static boolean sPreloadComplete;
 
+    /**
+     * Cached classloader to use for the system server. Will only be populated in the system
+     * server process.
+     */
+    private static ClassLoader sCachedSystemServerClassLoader = null;
+
     static void preload(TimingsTraceLog bootTimingsTraceLog) {
         Log.d(TAG, "begin preload");
         bootTimingsTraceLog.traceBegin("BeginPreload");
@@ -183,12 +187,6 @@ public class ZygoteInit {
         System.loadLibrary("android");
         System.loadLibrary("compiler_rt");
         System.loadLibrary("jnigraphics");
-
-        try {
-            System.loadLibrary("sfplugin_ccodec");
-        } catch (Error | RuntimeException e) {
-            // tolerate missing sfplugin_ccodec which is only present on Codec 2 devices
-        }
     }
 
     native private static void nativePreloadAppProcessHALs();
@@ -379,16 +377,19 @@ public class ZygoteInit {
         SharedLibraryInfo hidlBase = new SharedLibraryInfo(
                 "/system/framework/android.hidl.base-V1.0-java.jar", null /*packageName*/,
                 null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/);
+                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+                false /*isNative*/);
         SharedLibraryInfo hidlManager = new SharedLibraryInfo(
                 "/system/framework/android.hidl.manager-V1.0-java.jar", null /*packageName*/,
                 null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/);
+                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+                false /*isNative*/);
 
         SharedLibraryInfo androidTestBase = new SharedLibraryInfo(
                 "/system/framework/android.test.base.jar", null /*packageName*/,
                 null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/);
+                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+                false /*isNative*/);
 
         ApplicationLoaders.getDefault().createAndCacheNonBootclasspathSystemClassLoaders(
                 new SharedLibraryInfo[]{
@@ -511,7 +512,6 @@ public class ZygoteInit {
 
         final String systemServerClasspath = Os.getenv("SYSTEMSERVERCLASSPATH");
         if (systemServerClasspath != null) {
-            performSystemServerDexOpt(systemServerClasspath);
             // Capturing profiles is only supported for debug or eng builds since selinux normally
             // prevents it.
             if (shouldProfileSystemServer() && (Build.IS_USERDEBUG || Build.IS_ENG)) {
@@ -543,10 +543,8 @@ public class ZygoteInit {
 
             throw new IllegalStateException("Unexpected return from WrapperInit.execApplication");
         } else {
-            ClassLoader cl = null;
-            if (systemServerClasspath != null) {
-                cl = createPathClassLoader(systemServerClasspath, parsedArgs.mTargetSdkVersion);
-
+            ClassLoader cl = getOrCreateSystemServerClassLoader();
+            if (cl != null) {
                 Thread.currentThread().setContextClassLoader(cl);
             }
 
@@ -559,6 +557,45 @@ public class ZygoteInit {
         }
 
         /* should never reach here */
+    }
+
+    /**
+     * Create the classloader for the system server and store it in
+     * {@link sCachedSystemServerClassLoader}. This function is called through JNI in the forked
+     * system server process in the zygote SELinux domain.
+     */
+    private static ClassLoader getOrCreateSystemServerClassLoader() {
+        if (sCachedSystemServerClassLoader == null) {
+            final String systemServerClasspath = Os.getenv("SYSTEMSERVERCLASSPATH");
+            if (systemServerClasspath != null) {
+                sCachedSystemServerClassLoader = createPathClassLoader(systemServerClasspath,
+                        VMRuntime.SDK_VERSION_CUR_DEVELOPMENT);
+            }
+        }
+        return sCachedSystemServerClassLoader;
+    }
+
+    /**
+     * Creates class loaders for standalone system server jars. This function is called through JNI
+     * in the forked system server process in the zygote SELinux domain.
+     */
+    private static void prefetchStandaloneSystemServerJars() {
+        String envStr = Os.getenv("STANDALONE_SYSTEMSERVER_JARS");
+        if (TextUtils.isEmpty(envStr)) {
+            return;
+        }
+        for (String jar : envStr.split(":")) {
+            try {
+                SystemServerClassLoaderFactory.createClassLoader(
+                        jar, getOrCreateSystemServerClassLoader());
+            } catch (Error e) {
+                // We don't want the process to crash for this error because prefetching is just an
+                // optimization.
+                Log.e(TAG,
+                        String.format("Failed to prefetch standalone system server jar \"%s\": %s",
+                                jar, e.toString()));
+            }
+        }
     }
 
     /**
@@ -586,10 +623,18 @@ public class ZygoteInit {
                 codePaths[0],
                 /*dexMetadata*/ null);
 
-        File profileDir = Environment.getDataProfilesDePackageDirectory(
+        File curProfileDir = Environment.getDataProfilesDePackageDirectory(
                 UserHandle.USER_SYSTEM, systemServerPackageName);
-        String profilePath = new File(profileDir, systemServerProfileName).getAbsolutePath();
-        VMRuntime.registerAppInfo(profilePath, codePaths);
+        String curProfilePath = new File(curProfileDir, systemServerProfileName).getAbsolutePath();
+        File refProfileDir = Environment.getDataProfilesDePackageDirectory(
+                UserHandle.USER_SYSTEM, systemServerPackageName);
+        String refProfilePath = new File(refProfileDir, systemServerProfileName).getAbsolutePath();
+        VMRuntime.registerAppInfo(
+                systemServerPackageName,
+                curProfilePath,
+                refProfilePath,
+                codePaths,
+                VMRuntime.CODE_PATH_TYPE_PRIMARY_APK);
     }
 
     /**
@@ -627,95 +672,6 @@ public class ZygoteInit {
 
         return ClassLoaderFactory.createClassLoader(classPath, libraryPath, libraryPath,
                 parent, targetSdkVersion, true /* isNamespaceShared */, null /* classLoaderName */);
-    }
-
-    /**
-     * Performs dex-opt on the elements of {@code classPath}, if needed. We choose the instruction
-     * set of the current runtime.
-     */
-    private static void performSystemServerDexOpt(String classPath) {
-        final String[] classPathElements = classPath.split(":");
-        final String instructionSet = VMRuntime.getRuntime().vmInstructionSet();
-
-        String classPathForElement = "";
-        for (String classPathElement : classPathElements) {
-            // We default to the verify filter because the compilation will happen on /data and
-            // system server cannot load executable code outside /system.
-            String systemServerFilter = SystemProperties.get(
-                    "dalvik.vm.systemservercompilerfilter", "verify");
-
-            String classLoaderContext =
-                        getSystemServerClassLoaderContext(classPathForElement);
-            int dexoptNeeded;
-            try {
-                dexoptNeeded = DexFile.getDexOptNeeded(
-                        classPathElement, instructionSet, systemServerFilter,
-                        classLoaderContext, false /* newProfile */, false /* downgrade */);
-            } catch (FileNotFoundException ignored) {
-                // Do not add to the classpath.
-                Log.w(TAG, "Missing classpath element for system server: " + classPathElement);
-                continue;
-            } catch (IOException e) {
-                // Not fully clear what to do here as we don't know the cause of the
-                // IO exception. Add to the classpath to be conservative, but don't
-                // attempt to compile it.
-                Log.w(TAG, "Error checking classpath element for system server: "
-                        + classPathElement, e);
-                dexoptNeeded = DexFile.NO_DEXOPT_NEEDED;
-            }
-
-            if (dexoptNeeded != DexFile.NO_DEXOPT_NEEDED) {
-                final String packageName = "*";
-                final String outputPath = null;
-                final int dexFlags = 0;
-                final String uuid = StorageManager.UUID_PRIVATE_INTERNAL;
-                final String seInfo = null;
-                final int targetSdkVersion = 0;  // SystemServer targets the system's SDK version
-                // Wait for installd to be made available
-                IInstalld installd = IInstalld.Stub.asInterface(
-                        ServiceManager.waitForService("installd"));
-
-                try {
-                    installd.dexopt(classPathElement, Process.SYSTEM_UID, packageName,
-                            instructionSet, dexoptNeeded, outputPath, dexFlags, systemServerFilter,
-                            uuid, classLoaderContext, seInfo, false /* downgrade */,
-                            targetSdkVersion, /*profileName*/ null, /*dexMetadataPath*/ null,
-                            "server-dexopt");
-                } catch (RemoteException | ServiceSpecificException e) {
-                    // Ignore (but log), we need this on the classpath for fallback mode.
-                    Log.w(TAG, "Failed compiling classpath element for system server: "
-                            + classPathElement, e);
-                }
-            }
-
-            classPathForElement = encodeSystemServerClassPath(
-                    classPathForElement, classPathElement);
-        }
-    }
-
-    /**
-     * Encodes the system server class loader context in a format that is accepted by dexopt. This
-     * assumes the system server is always loaded with a {@link dalvik.system.PathClassLoader}.
-     *
-     * Note that ideally we would use the {@code DexoptUtils} to compute this. However we have no
-     * dependency here on the server so we hard code the logic again.
-     */
-    private static String getSystemServerClassLoaderContext(String classPath) {
-        return classPath == null ? "PCL[]" : "PCL[" + classPath + "]";
-    }
-
-    /**
-     * Encodes the class path in a format accepted by dexopt.
-     *
-     * @param classPath  The old class path (may be empty).
-     * @param newElement  The new class path elements
-     * @return The class path encoding resulted from appending {@code newElement} to {@code
-     * classPath}.
-     */
-    private static String encodeSystemServerClassPath(String classPath, String newElement) {
-        return (classPath == null || classPath.isEmpty())
-                ? newElement
-                : classPath + ":" + newElement;
     }
 
     /**
@@ -757,7 +713,7 @@ public class ZygoteInit {
                 "--setuid=1000",
                 "--setgid=1000",
                 "--setgroups=1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1018,1021,1023,"
-                        + "1024,1032,1065,3001,3002,3003,3006,3007,3009,3010,3011",
+                        + "1024,1032,1065,3001,3002,3003,3005,3006,3007,3009,3010,3011,3012",
                 "--capabilities=" + capabilities + "," + capabilities,
                 "--nice-name=system_server",
                 "--runtime-args",
@@ -780,10 +736,13 @@ public class ZygoteInit {
             Zygote.applyInvokeWithSystemProperty(parsedArgs);
 
             if (Zygote.nativeSupportsMemoryTagging()) {
-                /* The system server has ASYNC MTE by default, in order to allow
-                 * system services to specify their own MTE level later, as you
-                 * can't re-enable MTE once it's disabled. */
-                String mode = SystemProperties.get("arm64.memtag.process.system_server", "async");
+                String mode = SystemProperties.get("arm64.memtag.process.system_server", "");
+                if (mode.isEmpty()) {
+                  /* The system server has ASYNC MTE by default, in order to allow
+                   * system services to specify their own MTE level later, as you
+                   * can't re-enable MTE once it's disabled. */
+                  mode = SystemProperties.get("persist.arm64.memtag.default", "async");
+                }
                 if (mode.equals("async")) {
                     parsedArgs.mRuntimeFlags |= Zygote.MEMORY_TAG_LEVEL_ASYNC;
                 } else if (mode.equals("sync")) {
@@ -963,7 +922,7 @@ public class ZygoteInit {
             // loops forever in the zygote.
             caller = zygoteServer.runSelectLoop(abiList);
         } catch (Throwable ex) {
-            Log.e(TAG, "System zygote died with exception", ex);
+            Log.e(TAG, "System zygote died with fatal exception", ex);
             throw ex;
         } finally {
             if (zygoteServer != null) {

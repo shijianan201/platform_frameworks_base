@@ -43,6 +43,7 @@ import android.telephony.ICellInfoCallback;
 import android.telephony.ModemActivityInfo;
 import android.telephony.NeighboringCellInfo;
 import android.telephony.NetworkScanRequest;
+import android.telephony.PhoneCapability;
 import android.telephony.PhoneNumberRange;
 import android.telephony.RadioAccessFamily;
 import android.telephony.RadioAccessSpecifier;
@@ -54,6 +55,7 @@ import android.telephony.VisualVoicemailSmsFilterSettings;
 import android.telephony.emergency.EmergencyNumber;
 import android.telephony.ims.RcsClientConfiguration;
 import android.telephony.ims.RcsContactUceCapability;
+import android.telephony.ims.aidl.IFeatureProvisioningCallback;
 import android.telephony.ims.aidl.IImsCapabilityCallback;
 import android.telephony.ims.aidl.IImsConfig;
 import android.telephony.ims.aidl.IImsConfigCallback;
@@ -66,6 +68,8 @@ import com.android.ims.internal.IImsServiceFeatureCallback;
 import com.android.internal.telephony.CellNetworkScanResult;
 import com.android.internal.telephony.IBooleanConsumer;
 import com.android.internal.telephony.ICallForwardingInfoCallback;
+import com.android.internal.telephony.IccLogicalChannelRequest;
+import com.android.internal.telephony.IImsStateCallback;
 import com.android.internal.telephony.IIntegerConsumer;
 import com.android.internal.telephony.INumberVerificationCallback;
 import com.android.internal.telephony.OperatorInfo;
@@ -75,6 +79,7 @@ import java.util.Map;
 
 import android.telephony.UiccCardInfo;
 import android.telephony.UiccSlotInfo;
+import android.telephony.UiccSlotMapping;
 
 /**
  * Interface used to interact with the phone.  Mostly this is used by the
@@ -265,13 +270,13 @@ interface ITelephony {
      * Allow mobile data connections.
      */
     @UnsupportedAppUsage
-    boolean enableDataConnectivity();
+    boolean enableDataConnectivity(String callingPackage);
 
     /**
      * Disallow mobile data connections.
      */
     @UnsupportedAppUsage
-    boolean disableDataConnectivity();
+    boolean disableDataConnectivity(String callingPackage);
 
     /**
      * Report whether data connectivity is possible.
@@ -297,9 +302,9 @@ interface ITelephony {
     int getCallState();
 
     /**
-     * Returns the call state for a slot.
+     * Returns the call state for a specific subscriiption.
      */
-    int getCallStateForSlot(int slotIndex);
+    int getCallStateForSubscription(int subId, String callingPackage, String featureId);
 
     /**
      * Replaced by getDataActivityForSubId.
@@ -581,64 +586,32 @@ interface ITelephony {
     void setCellInfoListRate(int rateInMillis);
 
     /**
-     * Opens a logical channel to the ICC card using the physical slot index.
-     *
-     * Input parameters equivalent to TS 27.007 AT+CCHO command.
-     *
-     * @param slotIndex The physical slot index of the target ICC card
-     * @param callingPackage the name of the package making the call.
-     * @param AID Application id. See ETSI 102.221 and 101.220.
-     * @param p2 P2 parameter (described in ISO 7816-4).
-     * @return an IccOpenLogicalChannelResponse object.
-     */
-    IccOpenLogicalChannelResponse iccOpenLogicalChannelBySlot(
-            int slotIndex, String callingPackage, String AID, int p2);
-
-    /**
      * Opens a logical channel to the ICC card.
      *
      * Input parameters equivalent to TS 27.007 AT+CCHO command.
      *
-     * @param subId The subscription to use.
-     * @param callingPackage the name of the package making the call.
-     * @param AID Application id. See ETSI 102.221 and 101.220.
-     * @param p2 P2 parameter (described in ISO 7816-4).
+     * @param request the parcelable used to indicate how to open the logical channel.
      * @return an IccOpenLogicalChannelResponse object.
      */
-    IccOpenLogicalChannelResponse iccOpenLogicalChannel(
-            int subId, String callingPackage, String AID, int p2);
-
-    /**
-     * Closes a previously opened logical channel to the ICC card using the physical slot index.
-     *
-     * Input parameters equivalent to TS 27.007 AT+CCHC command.
-     *
-     * @param slotIndex The physical slot index of the target ICC card
-     * @param channel is the channel id to be closed as returned by a
-     *            successful iccOpenLogicalChannel.
-     * @return true if the channel was closed successfully.
-     */
-    boolean iccCloseLogicalChannelBySlot(int slotIndex, int channel);
+    IccOpenLogicalChannelResponse iccOpenLogicalChannel(in IccLogicalChannelRequest request);
 
     /**
      * Closes a previously opened logical channel to the ICC card.
      *
      * Input parameters equivalent to TS 27.007 AT+CCHC command.
      *
-     * @param subId The subscription to use.
-     * @param channel is the channel id to be closed as returned by a
-     *            successful iccOpenLogicalChannel.
+     * @param request the parcelable used to indicate how to close the logical channel.
      * @return true if the channel was closed successfully.
      */
-    @UnsupportedAppUsage(trackingBug = 171933273)
-    boolean iccCloseLogicalChannel(int subId, int channel);
+    boolean iccCloseLogicalChannel(in IccLogicalChannelRequest request);
 
     /**
-     * Transmit an APDU to the ICC card over a logical channel using the physical slot index.
+     * Transmit an APDU to the ICC card over a logical channel using the physical slot index and port index.
      *
      * Input parameters equivalent to TS 27.007 AT+CGLA command.
      *
      * @param slotIndex The physical slot index of the target ICC card
+     * @param portIndex The unique index referring to a port belonging to the SIM slot
      * @param channel is the channel id to be closed as returned by a
      *            successful iccOpenLogicalChannel.
      * @param cla Class of the APDU command.
@@ -651,7 +624,7 @@ interface ITelephony {
      * @return The APDU response from the ICC card with the status appended at
      *            the end.
      */
-    String iccTransmitApduLogicalChannelBySlot(int slotIndex, int channel, int cla, int instruction,
+    String iccTransmitApduLogicalChannelByPort(int slotIndex, int portIndex, int channel, int cla, int instruction,
             int p1, int p2, int p3, String data);
 
     /**
@@ -677,11 +650,12 @@ interface ITelephony {
             int p1, int p2, int p3, String data);
 
     /**
-     * Transmit an APDU to the ICC card over the basic channel using the physical slot index.
+     * Transmit an APDU to the ICC card over the basic channel using the physical slot index and port index.
      *
      * Input parameters equivalent to TS 27.007 AT+CSIM command.
      *
      * @param slotIndex The physical slot index of the target ICC card
+     * @param portIndex The unique index referring to a port belonging to the SIM slot
      * @param callingPackage the name of the package making the call.
      * @param cla Class of the APDU command.
      * @param instruction Instruction of the APDU command.
@@ -693,7 +667,7 @@ interface ITelephony {
      * @return The APDU response from the ICC card with the status appended at
      *            the end.
      */
-    String iccTransmitApduBasicChannelBySlot(int slotIndex, String callingPackage, int cla,
+    String iccTransmitApduBasicChannelByPort(int slotIndex, int portIndex, String callingPackage, int cla,
             int instruction, int p1, int p2, int p3, String data);
 
     /**
@@ -898,6 +872,8 @@ interface ITelephony {
      * Perform a radio network scan and return the id of this scan.
      *
      * @param subId the id of the subscription.
+     * @param renounceFineLocationAccess Set this to true if the caller would not like to
+     * receive fine location related information
      * @param request Defines all the configs for network scan.
      * @param messenger Callback messages will be sent using this messenger.
      * @param binder the binder object instantiated in TelephonyManager.
@@ -905,8 +881,9 @@ interface ITelephony {
      * @param callingFeatureId The feature in the package
      * @return An id for this scan.
      */
-    int requestNetworkScan(int subId, in NetworkScanRequest request, in Messenger messenger,
-            in IBinder binder, in String callingPackage, String callingFeatureId);
+    int requestNetworkScan(int subId, in boolean renounceFineLocationAccess,
+            in NetworkScanRequest request, in Messenger messenger, in IBinder binder,
+	    in String callingPackage, String callingFeatureId);
 
     /**
      * Stop an existing radio network scan.
@@ -982,8 +959,9 @@ interface ITelephony {
      * @param subId user preferred subId.
      * @param reason the reason the data enable change is taking place
      * @param enable true to turn on, else false
+     * @param callingPackage the package that changed the data enabled state
      */
-     void setDataEnabledForReason(int subId, int reason, boolean enable);
+     void setDataEnabledForReason(int subId, int reason, boolean enable, String callingPackage);
 
     /**
      * Return whether data is enabled for certain reason
@@ -999,19 +977,6 @@ interface ITelephony {
      * @return {@code true} if manual network selection is allowed, otherwise return {@code false}.
      */
      boolean isManualNetworkSelectionAllowed(int subId);
-
-    /**
-     * Enable or disable always reporting signal strength changes from radio.
-     */
-     void setAlwaysReportSignalStrength(int subId, boolean isEnable);
-
-    /**
-     * Get P-CSCF address from PCO after data connection is established or modified.
-     * @param apnType the apnType, "ims" for IMS APN, "emergency" for EMERGENCY APN
-     * @param callingPackage The package making the call.
-     * @param callingFeatureId The feature in the package.
-     */
-    String[] getPcscfAddress(String apnType, String callingPackage, String callingFeatureId);
 
     /**
      * Set IMS registration state
@@ -1062,17 +1027,21 @@ interface ITelephony {
 
     /**
      * Similar to above, but check for the package whose name is pkgName.
+     * Requires that the calling app has READ_PRIVILEGED_PHONE_STATE permission
      */
     int checkCarrierPrivilegesForPackage(int subId, String pkgName);
 
     /**
      * Similar to above, but check across all phones.
+     * Requires that the calling app has READ_PRIVILEGED_PHONE_STATE permission
      */
     int checkCarrierPrivilegesForPackageAnyPhone(String pkgName);
 
     /**
      * Returns list of the package names of the carrier apps that should handle the input intent
      * and have carrier privileges for the given phoneId.
+     *
+     * Requires that the calling app has READ_PRIVILEGED_PHONE_STATE permission
      *
      * @param intent Intent that will be sent.
      * @param phoneId The phoneId on which the carrier app has carrier privileges.
@@ -1206,6 +1175,9 @@ interface ITelephony {
      * @return phone radio type and access technology
      */
     int getRadioAccessFamily(in int phoneId, String callingPackage);
+
+    void uploadCallComposerPicture(int subscriptionId, String callingPackage,
+            String contentType, in ParcelFileDescriptor fd, in ResultReceiver callback);
 
     /**
      * Enables or disables video calling.
@@ -1346,11 +1318,6 @@ interface ITelephony {
             String callingFeatureId);
 
     /**
-     * Returns the subscription ID associated with the specified PhoneAccount.
-     */
-    int getSubIdForPhoneAccount(in PhoneAccount phoneAccount);
-
-    /**
      * Returns the subscription ID associated with the specified PhoneAccountHandle.
      */
     int getSubIdForPhoneAccountHandle(in PhoneAccountHandle phoneAccountHandle,
@@ -1361,7 +1328,7 @@ interface ITelephony {
      */
     PhoneAccountHandle getPhoneAccountHandleForSubscriptionId(int subscriptionId);
 
-    void factoryReset(int subId);
+    void factoryReset(int subId, String callingPackage);
 
     /**
      * Returns users's current locale based on the SIM.
@@ -1383,12 +1350,17 @@ interface ITelephony {
     /**
      * Get the service state on specified subscription
      * @param subId Subscription id
+     * @param renounceFineLocationAccess Set this to true if the caller would not like to
+     * receive fine location related information
+     * @param renounceCoarseLocationAccess Set this to true if the caller would not like to
+     * receive coarse location related information
      * @param callingPackage The package making the call
      * @param callingFeatureId The feature in the package
      * @return Service state on specified subscription.
      */
-    ServiceState getServiceStateForSubscriber(int subId, String callingPackage,
-            String callingFeatureId);
+    ServiceState getServiceStateForSubscriber(int subId, boolean renounceFineLocationAccess,
+            boolean renounceCoarseLocationAccess,
+            String callingPackage, String callingFeatureId);
 
     /**
      * Returns the URI for the per-account voicemail ringtone set in Phone settings.
@@ -1439,11 +1411,13 @@ interface ITelephony {
 
     /**
      * Returns a list of packages that have carrier privileges for the specific phone.
+     * Requires that the calling app has READ_PRIVILEGED_PHONE_STATE permission
      */
     List<String> getPackagesWithCarrierPrivileges(int phoneId);
 
      /**
       * Returns a list of packages that have carrier privileges.
+      * Requires that the calling app has READ_PRIVILEGED_PHONE_STATE permission
       */
     List<String> getPackagesWithCarrierPrivilegesForAllPhones();
 
@@ -1728,15 +1702,33 @@ interface ITelephony {
      * @return UiccSlotInfo array.
      * @hide
      */
-    UiccSlotInfo[] getUiccSlotsInfo();
+    UiccSlotInfo[] getUiccSlotsInfo(String callingPackage);
 
     /**
      * Map logicalSlot to physicalSlot, and activate the physicalSlot if it is inactive.
      * @param physicalSlots Index i in the array representing physical slot for phone i. The array
      *        size should be same as getPhoneCount().
+     * @deprecated Use {@link #setSimSlotMapping(in List<UiccSlotMapping> slotMapping)} instead.
      * @return boolean Return true if the switch succeeds, false if the switch fails.
      */
     boolean switchSlots(in int[] physicalSlots);
+
+    /**
+     * Maps the logical slots to the SlotPortMapping which consist of both physical slot index and
+     * port index. Logical slot is the slot that is seen by modem. Physical slot is the actual
+     * physical slot. Port index is the index (enumerated value) for the associated port available
+     * on the SIM. Each physical slot can have multiple ports which enables multi-enabled profile
+     * (MEP). If eUICC physical slot supports 2 ports, then the port index is numbered 0,1 and if
+     * eUICC2 supports 4 ports then the port index is numbered 0,1,2,3. Each portId is unique within
+     * a UICC physical slot but not necessarily unique across UICC’s. SEP(Single enabled profile)
+     * eUICC and non-eUICC will only have port Index 0.
+     *
+     * Logical slots that are already mapped to the requested SlotPortMapping are not impacted.
+     * @param slotMapping Index i in the list representing slot mapping for phone i.
+     *
+     * @return {@code true} if the switch succeeds, {@code false} if the switch fails.
+     */
+    boolean setSimSlotMapping(in List<UiccSlotMapping> slotMapping);
 
     /**
      * Returns whether mobile data roaming is enabled on the subscription with id {@code subId}.
@@ -1910,6 +1902,16 @@ interface ITelephony {
     void setVoWiFiSettingEnabled(int subId, boolean isEnabled);
 
     /**
+     * return true if the user's setting for Voice over Cross SIM is enabled and false if it is not
+     */
+    boolean isCrossSimCallingEnabledByUser(int subId);
+
+    /**
+     * Sets the user's setting for whether or not Voice over Cross SIM is enabled.
+     */
+    void setCrossSimCallingEnabled(int subId, boolean isEnabled);
+
+    /**
      * return true if the user's setting for Voice over WiFi while roaming is enabled.
      */
     boolean isVoWiFiRoamingSettingEnabled(int subId);
@@ -1960,6 +1962,7 @@ interface ITelephony {
     /**
      * Return the emergency number list from all the active subscriptions.
      */
+    @SuppressWarnings(value={"untyped-collection"})
     Map getEmergencyNumberList(String callingPackage, String callingFeatureId);
 
     /**
@@ -1983,6 +1986,18 @@ interface ITelephony {
     void unregisterImsProvisioningChangedCallback(int subId, IImsConfigCallback callback);
 
     /**
+     * Register an IMS provisioning change callback with Telephony.
+     */
+    void registerFeatureProvisioningChangedCallback(int subId,
+            IFeatureProvisioningCallback callback);
+
+    /**
+     * unregister an existing IMS provisioning change callback.
+     */
+    void unregisterFeatureProvisioningChangedCallback(int subId,
+            IFeatureProvisioningCallback callback);
+
+    /**
      * Set the provisioning status for the IMS MmTel capability using the specified subscription.
      */
     void setImsProvisioningStatusForCapability(int subId, int capability, int tech,
@@ -1996,19 +2011,12 @@ interface ITelephony {
     /**
      * Get the provisioning status for the IMS Rcs capability specified.
      */
-    boolean getRcsProvisioningStatusForCapability(int subId, int capability);
+    boolean getRcsProvisioningStatusForCapability(int subId, int capability, int tech);
 
     /**
      * Set the provisioning status for the IMS Rcs capability using the specified subscription.
      */
-    void setRcsProvisioningStatusForCapability(int subId, int capability,
-            boolean isProvisioned);
-
-    /** Is the capability and tech flagged as provisioned in the cache */
-    boolean isMmTelCapabilityProvisionedInCache(int subId, int capability, int tech);
-
-    /** Set the provisioning for the capability and tech in the cache */
-    void cacheMmTelCapabilityProvisioning(int subId, int capability, int tech,
+    void setRcsProvisioningStatusForCapability(int subId, int capability, int tech,
             boolean isProvisioned);
 
     /**
@@ -2030,6 +2038,11 @@ interface ITelephony {
      * Set the String provisioning value for the provisioning key specified.
      */
     int setImsProvisioningString(int subId, int key, String value);
+
+    /**
+     * Start emergency callback mode for testing.
+     */
+    void startEmergencyCallbackMode();
 
     /**
      * Update Emergency Number List for Test Mode.
@@ -2098,9 +2111,9 @@ interface ITelephony {
              String callingFeatureId);
 
     /**
-     * Get the mapping from logical slots to physical slots.
+     * Get the mapping from logical slots to port index.
      */
-    int[] getSlotsMapping();
+    List<UiccSlotMapping> getSlotsMapping(String callingPackage);
 
     /**
      * Get the IRadio HAL Version encoded as 100 * MAJOR_VERSION + MINOR_VERSION or -1 if unknown
@@ -2130,7 +2143,7 @@ interface ITelephony {
 
     List<RadioAccessSpecifier> getSystemSelectionChannels(int subId);
 
-    boolean isMvnoMatched(int subId, int mvnoType, String mvnoMatchData);
+    boolean isMvnoMatched(int slotIndex, int mvnoType, String mvnoMatchData);
 
     /**
      * Enqueue a pending sms Consumer, which will answer with the user specified selection for an
@@ -2149,7 +2162,7 @@ interface ITelephony {
      */
     String getMmsUAProfUrl(int subId);
 
-    void setMobileDataPolicyEnabledStatus(int subscriptionId, int policy, boolean enabled);
+    void setMobileDataPolicyEnabled(int subscriptionId, int policy, boolean enabled);
 
     boolean isMobileDataPolicyEnabled(int subscriptionId, int policy);
 
@@ -2182,7 +2195,7 @@ interface ITelephony {
 
     /**
      * Get the user manual network selection.
-     * Return empty string if in automatic selection.
+     * Return null if inactive or phone process is down.
      *
      * @param subId the id of the subscription
      * @return operatorinfo on success
@@ -2201,6 +2214,20 @@ interface ITelephony {
      * does not exist on the SIM card.
      */
     List<String> getEquivalentHomePlmns(int subId, String callingPackage, String callingFeatureId);
+
+    /**
+     * Enable or disable Voice over NR (VoNR)
+     * @param subId the subscription ID that this action applies to.
+     * @param enabled enable or disable VoNR.
+     * @return operation result.
+     */
+    int setVoNrEnabled(int subId, boolean enabled);
+
+    /**
+     * Is voice over NR enabled
+     * @return true if VoNR is enabled else false
+     */
+    boolean isVoNrEnabled(int subId);
 
     /**
      * Enable/Disable E-UTRA-NR Dual Connectivity
@@ -2239,7 +2266,7 @@ interface ITelephony {
             String callingPackage);
 
     /**
-     * Get the Generic Bootstrapping Architecture authentication keys
+     * get the Generic Bootstrapping Architecture authentication keys
      */
     void bootstrapAuthenticationRequest(int subId, int appType, in Uri nafUrl,
             in UaSecurityProtocolIdentifier securityProtocol,
@@ -2322,6 +2349,17 @@ interface ITelephony {
     void sendDeviceToDeviceMessage(int message, int value);
 
     /**
+     * Sets the specified transport active; only for use through shell.
+     */
+    void setActiveDeviceToDeviceTransport(String transport);
+
+    /**
+     * Forces Device to Device communication to be enabled, even if the device config has it
+     * disabled.
+     */
+    void setDeviceToDeviceForceEnabled(boolean isForceEnabled);
+
+    /**
      * Gets the config of RCS VoLTE single registration enabled for the carrier/subscription.
      */
     boolean getCarrierSingleRegistrationEnabled(int subId);
@@ -2351,6 +2389,11 @@ interface ITelephony {
      * Get the EAB contact from the EAB database.
      */
     String getContactFromEab(String contact);
+
+    /**
+     * Get the EAB capability from the EAB database.
+     */
+    String getCapabilityFromEab(String contact);
 
     /*
      * Check whether the device supports RCS User Capability Exchange or not.
@@ -2398,6 +2441,18 @@ interface ITelephony {
     String getLastUcePidfXmlShell(int subId);
 
     /**
+      * Remove UCE requests cannot be sent to the network status.
+      * Note: This is designed for a SHELL command only.
+      */
+    boolean removeUceRequestDisallowedStatus(int subId);
+
+    /**
+     * Set the timeout for contact capabilities request.
+     * Note: This is designed for a SHELL command only.
+     */
+    boolean setCapabilitiesRequestTimeout(int subId, long timeoutAfterMs);
+
+    /**
      * Set a SignalStrengthUpdateRequest to receive notification when Signal Strength breach the
      * specified thresholds.
      */
@@ -2409,6 +2464,11 @@ interface ITelephony {
      */
     void clearSignalStrengthUpdateRequest(int subId, in SignalStrengthUpdateRequest request,
             String callingPackage);
+
+    /**
+     * Gets the current phone capability.
+     */
+    PhoneCapability getPhoneCapability();
 
     /**
      * Prepare TelephonyManager for an unattended reboot. The reboot is
@@ -2423,4 +2483,88 @@ interface ITelephony {
      * of error.
      */
     int prepareForUnattendedReboot();
+
+    /**
+     * Request to get the current slicing configuration including URSP rules and
+     * NSSAIs (configured, allowed and rejected).
+     */
+    void getSlicingConfig(in ResultReceiver callback);
+
+    /**
+     * Register an IMS connection state callback
+     */
+    void registerImsStateCallback(int subId, int feature, in IImsStateCallback cb,
+            in String callingPackage);
+
+    /**
+     * Unregister an IMS connection state callback
+     */
+    void unregisterImsStateCallback(in IImsStateCallback cb);
+
+    /**
+     * return last known cell identity
+     * @param subId user preferred subId.
+     * @param callingPackage the name of the package making the call.
+     * @param callingFeatureId The feature in the package.
+     */
+    CellIdentity getLastKnownCellIdentity(int subId, String callingPackage,
+            String callingFeatureId);
+
+    /** Check if telephony new data stack is enabled. */
+    boolean isUsingNewDataStack();
+
+    /**
+     *  @return true if the modem service is set successfully, false otherwise.
+     */
+    boolean setModemService(in String serviceName);
+
+    /**
+     * @return the service name of the modem service which bind to.
+     */
+    String getModemService();
+
+    /**
+     * Is Provisioning required for capability
+     * @return true if provisioning is required for the MMTEL capability and IMS
+     * registration technology specified, false if it is not required.
+     */
+    boolean isProvisioningRequiredForCapability(int subId, int capability, int tech);
+
+    /**
+     * Is RCS Provisioning required for capability
+     * @return true if provisioning is required for the RCS capability and IMS
+     * registration technology specified, false if it is not required.
+     */
+    boolean isRcsProvisioningRequiredForCapability(int subId, int capability, int tech);
+
+    /**
+     * Sets a voice service state from telecom based on the current PhoneAccounts registered. See
+     * PhoneAccount#CAPABILITY_VOICE_CALLING_AVAILABLE.
+     */
+    void setVoiceServiceStateOverride(int subId, boolean hasService, String callingPackage);
+
+    /**
+     * Returns the package name that provides the {@link CarrierService} implementation for the
+     * specified {@code logicalSlotIndex}, or {@code null} if no package with carrier privileges
+     * declares one.
+     *
+     * @param logicalSlotIndex The slot index to fetch the {@link CarrierService} package for
+     * @return The system-selected package that provides the {@link CarrierService} implementation
+     * for the slot, or {@code null} if none is resolved
+     */
+    String getCarrierServicePackageNameForLogicalSlot(int logicalSlotIndex);
+
+    /**
+     * set removable eSIM as default eUICC.
+     *
+     * @hide
+     */
+    void setRemovableEsimAsDefaultEuicc(boolean isDefault, String callingPackage);
+
+    /**
+     * Returns whether the removable eSIM is default eUICC or not.
+     *
+     * @hide
+     */
+    boolean isRemovableEsimDefaultEuicc(String callingPackage);
 }

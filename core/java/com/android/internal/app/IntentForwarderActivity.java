@@ -16,15 +16,15 @@
 
 package com.android.internal.app;
 
+import static android.app.admin.DevicePolicyResources.Strings.Core.FORWARD_INTENT_TO_PERSONAL;
+import static android.app.admin.DevicePolicyResources.Strings.Core.FORWARD_INTENT_TO_WORK;
 import static android.content.pm.PackageManager.MATCH_DEFAULT_ONLY;
 
 import static com.android.internal.app.ResolverActivity.EXTRA_CALLING_USER;
 import static com.android.internal.app.ResolverActivity.EXTRA_SELECTED_PROFILE;
 
 import android.annotation.Nullable;
-import android.annotation.StringRes;
 import android.app.Activity;
-import android.app.ActivityTaskManager;
 import android.app.ActivityThread;
 import android.app.AppGlobals;
 import android.app.admin.DevicePolicyManager;
@@ -102,16 +102,16 @@ public class IntentForwarderActivity extends Activity  {
         Intent intentReceived = getIntent();
         String className = intentReceived.getComponent().getClassName();
         final int targetUserId;
-        final int userMessageId;
+        final String userMessage;
         if (className.equals(FORWARD_INTENT_TO_PARENT)) {
-            userMessageId = com.android.internal.R.string.forward_intent_to_owner;
+            userMessage = getForwardToPersonalMessage();
             targetUserId = getProfileParent();
 
             getMetricsLogger().write(
                     new LogMaker(MetricsEvent.ACTION_SWITCH_SHARE_PROFILE)
                     .setSubtype(MetricsEvent.PARENT_PROFILE));
         } else if (className.equals(FORWARD_INTENT_TO_MANAGED_PROFILE)) {
-            userMessageId = com.android.internal.R.string.forward_intent_to_work;
+            userMessage = getForwardToWorkMessage();
             targetUserId = getManagedProfile();
 
             getMetricsLogger().write(
@@ -119,7 +119,7 @@ public class IntentForwarderActivity extends Activity  {
                     .setSubtype(MetricsEvent.MANAGED_PROFILE));
         } else {
             Slog.wtf(TAG, IntentForwarderActivity.class.getName() + " cannot be called directly");
-            userMessageId = -1;
+            userMessage = null;
             targetUserId = UserHandle.USER_NULL;
         }
         if (targetUserId == UserHandle.USER_NULL) {
@@ -157,9 +157,21 @@ public class IntentForwarderActivity extends Activity  {
                     return targetResolveInfo;
                 }, mExecutorService)
                 .thenAcceptAsync(result -> {
-                    maybeShowDisclosure(intentReceived, result, userMessageId);
+                    maybeShowDisclosure(intentReceived, result, userMessage);
                     finish();
                 }, getApplicationContext().getMainExecutor());
+    }
+
+    private String getForwardToPersonalMessage() {
+        return getSystemService(DevicePolicyManager.class).getResources().getString(
+                FORWARD_INTENT_TO_PERSONAL,
+                () -> getString(com.android.internal.R.string.forward_intent_to_owner));
+    }
+
+    private String getForwardToWorkMessage() {
+        return getSystemService(DevicePolicyManager.class).getResources().getString(
+                FORWARD_INTENT_TO_WORK,
+                () -> getString(com.android.internal.R.string.forward_intent_to_work));
     }
 
     private boolean isIntentForwarderResolveInfo(ResolveInfo resolveInfo) {
@@ -184,9 +196,9 @@ public class IntentForwarderActivity extends Activity  {
     }
 
     private void maybeShowDisclosure(
-            Intent intentReceived, ResolveInfo resolveInfo, int messageId) {
-        if (shouldShowDisclosure(resolveInfo, intentReceived)) {
-            mInjector.showToast(messageId, Toast.LENGTH_LONG);
+            Intent intentReceived, ResolveInfo resolveInfo, @Nullable String message) {
+        if (shouldShowDisclosure(resolveInfo, intentReceived) && message != null) {
+            mInjector.showToast(message, Toast.LENGTH_LONG);
         }
     }
 
@@ -195,22 +207,11 @@ public class IntentForwarderActivity extends Activity  {
             startActivityAsCaller(
                     newIntent,
                     /* options= */ null,
-                    /* permissionToken= */ null,
                     /* ignoreTargetSecurity= */ false,
                     userId);
         } catch (RuntimeException e) {
-            int launchedFromUid = -1;
-            String launchedFromPackage = "?";
-            try {
-                launchedFromUid = ActivityTaskManager.getService().getLaunchedFromUid(
-                        getActivityToken());
-                launchedFromPackage = ActivityTaskManager.getService()
-                        .getLaunchedFromPackage(getActivityToken());
-            } catch (RemoteException ignored) {
-            }
-
-            Slog.wtf(TAG, "Unable to launch as UID " + launchedFromUid + " package "
-                    + launchedFromPackage + ", while running in "
+            Slog.wtf(TAG, "Unable to launch as UID " + getLaunchedFromUid() + " package "
+                    + getLaunchedFromPackage() + ", while running in "
                     + ActivityThread.currentProcessName(), e);
         }
     }
@@ -229,7 +230,7 @@ public class IntentForwarderActivity extends Activity  {
             return;
         }
         sanitizeIntent(innerIntent);
-        startActivityAsCaller(intentReceived, null, null, false, getUserId());
+        startActivityAsCaller(intentReceived, null, false, getUserId());
         finish();
     }
 
@@ -249,7 +250,7 @@ public class IntentForwarderActivity extends Activity  {
         sanitizeIntent(intentReceived);
         intentReceived.putExtra(EXTRA_SELECTED_PROFILE, selectedProfile);
         intentReceived.putExtra(EXTRA_CALLING_USER, UserHandle.of(callingUserId));
-        startActivityAsCaller(intentReceived, null, null, false, userId);
+        startActivityAsCaller(intentReceived, null, false, userId);
         finish();
     }
 
@@ -416,8 +417,8 @@ public class IntentForwarderActivity extends Activity  {
         }
 
         @Override
-        public void showToast(int messageId, int duration) {
-            Toast.makeText(IntentForwarderActivity.this, getString(messageId), duration).show();
+        public void showToast(String message, int duration) {
+            Toast.makeText(IntentForwarderActivity.this, message, duration).show();
         }
     }
 
@@ -430,6 +431,6 @@ public class IntentForwarderActivity extends Activity  {
 
         CompletableFuture<ResolveInfo> resolveActivityAsUser(Intent intent, int flags, int userId);
 
-        void showToast(@StringRes int messageId, int duration);
+        void showToast(String message, int duration);
     }
 }

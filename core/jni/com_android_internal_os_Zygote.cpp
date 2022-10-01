@@ -27,9 +27,11 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
+#include <iterator>
 #include <list>
 #include <optional>
 #include <sstream>
@@ -60,7 +62,6 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
-#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -93,6 +94,10 @@
 
 #include "nativebridge/native_bridge.h"
 
+#if defined(__BIONIC__)
+extern "C" void android_reset_stack_guards();
+#endif
+
 namespace {
 
 // TODO (chriswailes): Add a function to initialize native Zygote data.
@@ -109,6 +114,8 @@ using android::base::GetBoolProperty;
 
 using android::zygote::ZygoteFailure;
 
+using Action = android_mallopt_gwp_asan_options_t::Action;
+
 // This type is duplicated in fd_utils.h
 typedef const std::function<void(std::string)>& fail_fn_t;
 
@@ -119,6 +126,11 @@ static const char kZygoteClassName[] = "com/android/internal/os/Zygote";
 static jclass gZygoteClass;
 static jmethodID gCallPostForkSystemServerHooks;
 static jmethodID gCallPostForkChildHooks;
+
+static constexpr const char* kZygoteInitClassName = "com/android/internal/os/ZygoteInit";
+static jclass gZygoteInitClass;
+static jmethodID gGetOrCreateSystemServerClassLoader;
+static jmethodID gPrefetchStandaloneSystemServerJars;
 
 static bool gIsSecurityEnforced = true;
 
@@ -168,6 +180,7 @@ static constexpr const uint64_t UPPER_HALF_WORD_MASK = 0xFFFF'FFFF'0000'0000;
 static constexpr const uint64_t LOWER_HALF_WORD_MASK = 0x0000'0000'FFFF'FFFF;
 
 static constexpr const char* kCurProfileDirPath = "/data/misc/profiles/cur";
+static constexpr const char* kRefProfileDirPath = "/data/misc/profiles/ref";
 
 /**
  * The maximum value that the gUSAPPoolSizeMax variable may take.  This value
@@ -183,6 +196,19 @@ static constexpr int PROCESS_PRIORITY_MIN = 19;
 
 /** The numeric value for the normal priority a process should have. */
 static constexpr int PROCESS_PRIORITY_DEFAULT = 0;
+
+/** Exponential back off parameters for storage dir check. */
+static constexpr unsigned int STORAGE_DIR_CHECK_RETRY_MULTIPLIER = 2;
+static constexpr unsigned int STORAGE_DIR_CHECK_INIT_INTERVAL_US = 50;
+static constexpr unsigned int STORAGE_DIR_CHECK_MAX_INTERVAL_US = 1000;
+/**
+ * Lower bound time we allow storage dir check to sleep.
+ * If it exceeds 2s, PROC_START_TIMEOUT_MSG will kill the starting app anyway,
+ * so it's fine to assume max retries is 5 mins.
+ */
+static constexpr int STORAGE_DIR_CHECK_TIMEOUT_US = 1000 * 1000 * 60 * 5;
+
+static void WaitUntilDirReady(const std::string& target, fail_fn_t fail_fn);
 
 /**
  * A helper class containing accounting information for USAPs.
@@ -326,7 +352,8 @@ enum RuntimeFlags : uint32_t {
     GWP_ASAN_LEVEL_NEVER = 0 << 21,
     GWP_ASAN_LEVEL_LOTTERY = 1 << 21,
     GWP_ASAN_LEVEL_ALWAYS = 2 << 21,
-    NATIVE_HEAP_ZERO_INIT = 1 << 23,
+    NATIVE_HEAP_ZERO_INIT_ENABLED = 1 << 23,
+    PROFILEABLE = 1 << 24,
 };
 
 enum UnsolicitedZygoteMessageTypes : uint32_t {
@@ -389,6 +416,7 @@ static void sendSigChildStatus(const pid_t pid, const uid_t uid, const int statu
 }
 
 // This signal handler is for zygote mode, since the zygote must reap its children
+NO_STACK_PROTECTOR
 static void SigChldHandler(int /*signal_number*/, siginfo_t* info, void* /*ucontext*/) {
     pid_t pid;
     int status;
@@ -831,26 +859,6 @@ static void MountEmulatedStorage(uid_t uid, jint mount_mode,
   }
 }
 
-static bool NeedsNoRandomizeWorkaround() {
-#if !defined(__arm__)
-    return false;
-#else
-    int major;
-    int minor;
-    struct utsname uts;
-    if (uname(&uts) == -1) {
-        return false;
-    }
-
-    if (sscanf(uts.release, "%d.%d", &major, &minor) != 2) {
-        return false;
-    }
-
-    // Kernels before 3.4.* need the workaround.
-    return (major < 3) || ((major == 3) && (minor < 4));
-#endif
-}
-
 // Utility to close down the Zygote socket file descriptors while
 // the child is still running as root with Zygote's privileges.  Each
 // descriptor (if any) is closed via dup3(), replacing it with a valid
@@ -868,7 +876,7 @@ static void DetachDescriptors(JNIEnv* env,
 
     for (int fd : fds_to_close) {
       ALOGV("Switching descriptor %d to /dev/null", fd);
-      if (dup3(devnull_fd, fd, O_CLOEXEC) == -1) {
+      if (TEMP_FAILURE_RETRY(dup3(devnull_fd, fd, O_CLOEXEC)) == -1) {
         fail_fn(StringPrintf("Failed dup3() on descriptor %d: %s", fd, strerror(errno)));
       }
     }
@@ -894,7 +902,7 @@ void SetThreadName(const std::string& thread_name) {
 
   // pthread_setname_np fails rather than truncating long strings.
   char buf[16];       // MAX_TASK_COMM_LEN=16 is hard-coded into bionic
-  strlcpy(buf, name_start_ptr, sizeof(buf) - 1);
+  strlcpy(buf, name_start_ptr, sizeof(buf));
   errno = pthread_setname_np(pthread_self(), buf);
   if (errno != 0) {
     ALOGW("Unable to set the name of current thread to '%s': %s", buf, strerror(errno));
@@ -1144,14 +1152,14 @@ static void isolateAppDataPerPackage(int userId, std::string_view package_name,
 }
 
 // Relabel directory
-static void relabelDir(const char* path, security_context_t context, fail_fn_t fail_fn) {
+static void relabelDir(const char* path, const char* context, fail_fn_t fail_fn) {
   if (setfilecon(path, context) != 0) {
     fail_fn(CREATE_ERROR("Failed to setfilecon %s %s", path, strerror(errno)));
   }
 }
 
-// Relabel all directories under a path non-recursively.
-static void relabelAllDirs(const char* path, security_context_t context, fail_fn_t fail_fn) {
+// Relabel the subdirectories and symlinks in the given directory, non-recursively.
+static void relabelSubdirs(const char* path, const char* context, fail_fn_t fail_fn) {
   DIR* dir = opendir(path);
   if (dir == nullptr) {
     fail_fn(CREATE_ERROR("Failed to opendir %s", path));
@@ -1174,38 +1182,40 @@ static void relabelAllDirs(const char* path, security_context_t context, fail_fn
 }
 
 /**
- * Make other apps data directory not visible in CE, DE storage.
+ * Hide the CE and DE data directories of non-related apps.
  *
- * Apps without app data isolation can detect if another app is installed on system,
- * by "touching" other apps data directory like /data/data/com.whatsapp, if it returns
- * "Permission denied" it means apps installed, otherwise it returns "File not found".
- * Traditional file permissions or SELinux can only block accessing those directories but
- * can't fix fingerprinting like this.
- * We fix it by "overlaying" data directory, and only relevant app data packages exists
- * in data directories.
+ * Without this, apps can detect if any app is installed by trying to "touch" the app's CE
+ * or DE data directory, e.g. /data/data/com.whatsapp.  This fails with EACCES if the app
+ * is installed, or ENOENT if it's not.  Traditional file permissions or SELinux can only
+ * block accessing those directories but can't fix fingerprinting like this.
+ *
+ * Instead, we hide non-related apps' data directories from the filesystem entirely by
+ * mounting tmpfs instances over their parent directories and bind-mounting in just the
+ * needed app data directories.  This is done in a private mount namespace.
  *
  * Steps:
- * 1). Collect a list of all related apps (apps with same uid and allowlisted apps) data info
- * (package name, data stored volume uuid, and inode number of its CE data directory)
- * 2). Mount tmpfs on /data/data, /data/user(_de) and /mnt/expand, so apps no longer
- * able to access apps data directly.
- * 3). For each related app, create its app data directory and bind mount the actual content
- * from apps data mirror directory. This works on both CE and DE storage, as DE storage
- * is always available even storage is FBE locked, while we use inode number to find
- * the encrypted DE directory in mirror so we can still bind mount it successfully.
+ * (1) Collect a list of all related apps (apps with same uid and allowlisted apps) data info
+ *     (package name, data stored volume uuid, and inode number of its CE data directory)
+ * (2) Mount tmpfs on /data/data and /data/user{,_de}, and on /mnt/expand/$volume/user{,_de}
+ *     for all adoptable storage volumes.  This hides all app data directories.
+ * (3) For each related app, create stubs for its data directories in the relevant tmpfs
+ *     instances, then bind mount in the actual directories from /data_mirror.  This works
+ *     for both the CE and DE directories.  DE storage is always unlocked, whereas the
+ *     app's CE directory can be found via inode number if CE storage is locked.
  *
- * Example:
- * 0). Assuming com.android.foo CE data is stored in /data/data and no shared uid
- * 1). Mount a tmpfs on /data/data, /data/user, /data/user_de, /mnt/expand
- * List = ["com.android.foo", "null" (volume uuid "null"=default),
- * 123456 (inode number)]
- * 2). On DE storage, we create a directory /data/user_de/0/com.com.android.foo, and bind
- * mount (in the app's mount namespace) it from /data_mirror/data_de/0/com.android.foo.
- * 3). We do similar for CE storage. But in direct boot mode, as /data_mirror/data_ce/0/ is
- * encrypted, we can't find a directory with name com.android.foo on it, so we will
- * use the inode number to find the right directory instead, which that directory content will
- * be decrypted after storage is decrypted.
- *
+ * Example assuming user 0, app "com.android.foo", no shared uid, and no adoptable storage:
+ * (1) Info = ["com.android.foo", "null" (volume uuid "null"=default), "123456" (inode number)]
+ * (2) Mount tmpfs on /data/data, /data/user, and /data/user_de.
+ * (3) For DE storage, create a directory /data/user_de/0/com.android.foo and bind mount
+ *     /data_mirror/data_de/0/com.android.foo onto it.
+ * (4) Do similar for CE storage.  But if the device is in direct boot mode, then CE
+ *     storage will be locked, so the app's CE data directory won't exist at the usual
+ *     path /data_mirror/data_ce/0/com.android.foo.  It will still exist in
+ *     /data_mirror/data_ce/0, but its filename will be an unpredictable no-key name.  In
+ *     this case, we use the inode number to find the right directory instead.  Note that
+ *     the bind-mounted app CE data directory will remain locked.  It will be unlocked
+ *     automatically if/when the user's CE storage is unlocked, since adding an encryption
+ *     key takes effect on a whole filesystem instance including all its mounts.
  */
 static void isolateAppData(JNIEnv* env, const std::vector<std::string>& merged_data_info_list,
     uid_t uid, const char* process_name,
@@ -1226,10 +1236,18 @@ static void isolateAppData(JNIEnv* env, const std::vector<std::string>& merged_d
   snprintf(internalDePath, PATH_MAX, "/data/user_de");
   snprintf(externalPrivateMountPath, PATH_MAX, "/mnt/expand");
 
-  security_context_t dataDataContext = nullptr;
-  if (getfilecon(internalDePath, &dataDataContext) < 0) {
-    fail_fn(CREATE_ERROR("Unable to getfilecon on %s %s", internalDePath,
+  // Get the "u:object_r:system_userdir_file:s0" security context.  This can be
+  // gotten from several different places; we use /data/user.
+  char* dataUserdirContext = nullptr;
+  if (getfilecon(internalCePath, &dataUserdirContext) < 0) {
+    fail_fn(CREATE_ERROR("Unable to getfilecon on %s %s", internalCePath,
         strerror(errno)));
+  }
+  // Get the "u:object_r:system_data_file:s0" security context.  This can be
+  // gotten from several different places; we use /data/misc.
+  char* dataFileContext = nullptr;
+  if (getfilecon("/data/misc", &dataFileContext) < 0) {
+    fail_fn(CREATE_ERROR("Unable to getfilecon on /data/misc %s", strerror(errno)));
   }
 
   MountAppDataTmpFs(internalLegacyCePath, fail_fn);
@@ -1250,7 +1268,11 @@ static void isolateAppData(JNIEnv* env, const std::vector<std::string>& merged_d
     auto volPath = StringPrintf("%s/%s", externalPrivateMountPath, ent->d_name);
     auto cePath = StringPrintf("%s/user", volPath.c_str());
     auto dePath = StringPrintf("%s/user_de", volPath.c_str());
+    // Wait until dir user is created.
+    WaitUntilDirReady(cePath.c_str(), fail_fn);
     MountAppDataTmpFs(cePath.c_str(), fail_fn);
+    // Wait until dir user_de is created.
+    WaitUntilDirReady(dePath.c_str(), fail_fn);
     MountAppDataTmpFs(dePath.c_str(), fail_fn);
   }
   closedir(dir);
@@ -1321,19 +1343,19 @@ static void isolateAppData(JNIEnv* env, const std::vector<std::string>& merged_d
   // the file operations on tmpfs. If we set the label when we mount
   // tmpfs, SELinux will not happy as we are changing system_data_files.
   // Relabel dir under /data/user, including /data/user/0
-  relabelAllDirs(internalCePath, dataDataContext, fail_fn);
+  relabelSubdirs(internalCePath, dataFileContext, fail_fn);
 
   // Relabel /data/user
-  relabelDir(internalCePath, dataDataContext, fail_fn);
+  relabelDir(internalCePath, dataUserdirContext, fail_fn);
 
   // Relabel /data/data
-  relabelDir(internalLegacyCePath, dataDataContext, fail_fn);
+  relabelDir(internalLegacyCePath, dataFileContext, fail_fn);
 
-  // Relabel dir under /data/user_de
-  relabelAllDirs(internalDePath, dataDataContext, fail_fn);
+  // Relabel subdirectories of /data/user_de
+  relabelSubdirs(internalDePath, dataFileContext, fail_fn);
 
   // Relabel /data/user_de
-  relabelDir(internalDePath, dataDataContext, fail_fn);
+  relabelDir(internalDePath, dataUserdirContext, fail_fn);
 
   // Relabel CE and DE dirs under /mnt/expand
   dir = opendir(externalPrivateMountPath);
@@ -1346,14 +1368,15 @@ static void isolateAppData(JNIEnv* env, const std::vector<std::string>& merged_d
     auto cePath = StringPrintf("%s/user", volPath.c_str());
     auto dePath = StringPrintf("%s/user_de", volPath.c_str());
 
-    relabelAllDirs(cePath.c_str(), dataDataContext, fail_fn);
-    relabelDir(cePath.c_str(), dataDataContext, fail_fn);
-    relabelAllDirs(dePath.c_str(), dataDataContext, fail_fn);
-    relabelDir(dePath.c_str(), dataDataContext, fail_fn);
+    relabelSubdirs(cePath.c_str(), dataFileContext, fail_fn);
+    relabelDir(cePath.c_str(), dataUserdirContext, fail_fn);
+    relabelSubdirs(dePath.c_str(), dataFileContext, fail_fn);
+    relabelDir(dePath.c_str(), dataUserdirContext, fail_fn);
   }
   closedir(dir);
 
-  freecon(dataDataContext);
+  freecon(dataUserdirContext);
+  freecon(dataFileContext);
 }
 
 static void insertPackagesToMergedList(JNIEnv* env,
@@ -1419,6 +1442,7 @@ static void isolateJitProfile(JNIEnv* env, jobjectArray pkg_data_info_list,
   // Mount (namespace) tmpfs on profile directory, so apps no longer access
   // the original profile directory anymore.
   MountAppDataTmpFs(kCurProfileDirPath, fail_fn);
+  MountAppDataTmpFs(kRefProfileDirPath, fail_fn);
 
   // Create profile directory for this user.
   std::string actualCurUserProfile = StringPrintf("%s/%d", kCurProfileDirPath, user_id);
@@ -1432,15 +1456,50 @@ static void isolateJitProfile(JNIEnv* env, jobjectArray pkg_data_info_list,
         packageName.c_str());
     std::string mirrorCurPackageProfile = StringPrintf("/data_mirror/cur_profiles/%d/%s",
         user_id, packageName.c_str());
+    std::string actualRefPackageProfile = StringPrintf("%s/%s", kRefProfileDirPath,
+        packageName.c_str());
+    std::string mirrorRefPackageProfile = StringPrintf("/data_mirror/ref_profiles/%s",
+        packageName.c_str());
 
     if (access(mirrorCurPackageProfile.c_str(), F_OK) != 0) {
       ALOGW("Can't access app profile directory: %s", mirrorCurPackageProfile.c_str());
       continue;
     }
+    if (access(mirrorRefPackageProfile.c_str(), F_OK) != 0) {
+      ALOGW("Can't access app profile directory: %s", mirrorRefPackageProfile.c_str());
+      continue;
+    }
 
     PrepareDir(actualCurPackageProfile, DEFAULT_DATA_DIR_PERMISSION, uid, uid, fail_fn);
     BindMount(mirrorCurPackageProfile, actualCurPackageProfile, fail_fn);
+    PrepareDir(actualRefPackageProfile, DEFAULT_DATA_DIR_PERMISSION, uid, uid, fail_fn);
+    BindMount(mirrorRefPackageProfile, actualRefPackageProfile, fail_fn);
   }
+}
+
+static void WaitUntilDirReady(const std::string& target, fail_fn_t fail_fn) {
+  unsigned int sleepIntervalUs = STORAGE_DIR_CHECK_INIT_INTERVAL_US;
+
+  // This is just an approximate value as it doesn't need to be very accurate.
+  unsigned int sleepTotalUs = 0;
+
+  const char* dir_path = target.c_str();
+  while (sleepTotalUs < STORAGE_DIR_CHECK_TIMEOUT_US) {
+    if (access(dir_path, F_OK) == 0) {
+      return;
+    }
+    // Failed, so we add exponential backoff and retry
+    usleep(sleepIntervalUs);
+    sleepTotalUs += sleepIntervalUs;
+    sleepIntervalUs = std::min<unsigned int>(
+        sleepIntervalUs * STORAGE_DIR_CHECK_RETRY_MULTIPLIER,
+        STORAGE_DIR_CHECK_MAX_INTERVAL_US);
+  }
+  // Last chance and get the latest errno if it fails.
+  if (access(dir_path, F_OK) == 0) {
+    return;
+  }
+  fail_fn(CREATE_ERROR("Error dir is not ready %s: %s", dir_path, strerror(errno)));
 }
 
 static void BindMountStorageToLowerFs(const userid_t user_id, const uid_t uid,
@@ -1453,6 +1512,10 @@ static void BindMountStorageToLowerFs(const userid_t user_id, const uid_t uid,
         source = StringPrintf("/mnt/pass_through/%d/emulated/%d/%s/%s", user_id, user_id, dir_name,
                               package);
     }
+
+  // Directory might be not ready, as prepareStorageDirs() is running asynchronously in ProcessList,
+  // so wait until dir is created.
+  WaitUntilDirReady(source, fail_fn);
   std::string target = StringPrintf("/storage/emulated/%d/%s/%s", user_id, dir_name, package);
 
   // As the parent is mounted as tmpfs, we need to create the target dir here.
@@ -1552,10 +1615,11 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, 
     // since the directory is owned by root.
     if (!is_system_server && getuid() == 0) {
         const int rc = createProcessGroup(uid, getpid());
-        if (rc == -EROFS) {
-            ALOGW("createProcessGroup failed, kernel missing CONFIG_CGROUP_CPUACCT?");
-        } else if (rc != 0) {
-            ALOGE("createProcessGroup(%d, %d) failed: %s", uid, /* pid= */ 0, strerror(-rc));
+        if (rc != 0) {
+            fail_fn(rc == -EROFS ? CREATE_ERROR("createProcessGroup failed, kernel missing "
+                                                "CONFIG_CGROUP_CPUACCT?")
+                                 : CREATE_ERROR("createProcessGroup(%d, %d) failed: %s", uid,
+                                                /* pid= */ 0, strerror(-rc)));
         }
     }
 
@@ -1568,6 +1632,23 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, 
         android::PreInitializeNativeBridge(app_data_dir.has_value() ? app_data_dir.value().c_str()
                                                                     : nullptr,
                                            instruction_set.value().c_str());
+    }
+
+    if (is_system_server) {
+        // Prefetch the classloader for the system server. This is done early to
+        // allow a tie-down of the proper system server selinux domain.
+        env->CallStaticObjectMethod(gZygoteInitClass, gGetOrCreateSystemServerClassLoader);
+        if (env->ExceptionCheck()) {
+            // Be robust here. The Java code will attempt to create the classloader
+            // at a later point (but may not have rights to use AoT artifacts).
+            env->ExceptionClear();
+        }
+        // Also prefetch standalone system server jars. The reason for doing this here is the same
+        // as above.
+        env->CallStaticVoidMethod(gZygoteInitClass, gPrefetchStandaloneSystemServerJars);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
     }
 
     if (setresgid(gid, gid, gid) == -1) {
@@ -1647,37 +1728,36 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, 
     // would be nice to have them for apps, we will have to wait until they are
     // proven out, have more efficient hardware, and/or apply them only to new
     // applications.
-    if (!(runtime_flags & RuntimeFlags::NATIVE_HEAP_ZERO_INIT)) {
+    if (!(runtime_flags & RuntimeFlags::NATIVE_HEAP_ZERO_INIT_ENABLED)) {
         mallopt(M_BIONIC_ZERO_INIT, 0);
     }
 
     // Now that we've used the flag, clear it so that we don't pass unknown flags to the ART
     // runtime.
-    runtime_flags &= ~RuntimeFlags::NATIVE_HEAP_ZERO_INIT;
+    runtime_flags &= ~RuntimeFlags::NATIVE_HEAP_ZERO_INIT_ENABLED;
 
-    bool forceEnableGwpAsan = false;
+    const char* nice_name_ptr = nice_name.has_value() ? nice_name.value().c_str() : nullptr;
+    android_mallopt_gwp_asan_options_t gwp_asan_options;
+    // The system server doesn't have its nice name set by the time SpecializeCommon is called.
+    gwp_asan_options.program_name = nice_name_ptr ?: process_name;
     switch (runtime_flags & RuntimeFlags::GWP_ASAN_LEVEL_MASK) {
         default:
         case RuntimeFlags::GWP_ASAN_LEVEL_NEVER:
+            gwp_asan_options.desire = Action::DONT_TURN_ON_UNLESS_OVERRIDDEN;
+            android_mallopt(M_INITIALIZE_GWP_ASAN, &gwp_asan_options, sizeof(gwp_asan_options));
             break;
         case RuntimeFlags::GWP_ASAN_LEVEL_ALWAYS:
-            forceEnableGwpAsan = true;
-            [[fallthrough]];
+            gwp_asan_options.desire = Action::TURN_ON_FOR_APP;
+            android_mallopt(M_INITIALIZE_GWP_ASAN, &gwp_asan_options, sizeof(gwp_asan_options));
+            break;
         case RuntimeFlags::GWP_ASAN_LEVEL_LOTTERY:
-            android_mallopt(M_INITIALIZE_GWP_ASAN, &forceEnableGwpAsan, sizeof(forceEnableGwpAsan));
+            gwp_asan_options.desire = Action::TURN_ON_WITH_SAMPLING;
+            android_mallopt(M_INITIALIZE_GWP_ASAN, &gwp_asan_options, sizeof(gwp_asan_options));
+            break;
     }
     // Now that we've used the flag, clear it so that we don't pass unknown flags to the ART
     // runtime.
     runtime_flags &= ~RuntimeFlags::GWP_ASAN_LEVEL_MASK;
-
-    if (NeedsNoRandomizeWorkaround()) {
-        // Work around ARM kernel ASLR lossage (http://b/5817320).
-        int old_personality = personality(0xffffffff);
-        int new_personality = personality(old_personality | ADDR_NO_RANDOMIZE);
-        if (new_personality == -1) {
-            ALOGW("personality(%d) failed: %s", new_personality, strerror(errno));
-        }
-    }
 
     SetCapabilities(permitted_capabilities, effective_capabilities, permitted_capabilities,
                     fail_fn);
@@ -1686,7 +1766,6 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, 
     AStatsSocket_close();
 
     const char* se_info_ptr = se_info.has_value() ? se_info.value().c_str() : nullptr;
-    const char* nice_name_ptr = nice_name.has_value() ? nice_name.value().c_str() : nullptr;
 
     if (selinux_android_setcontext(uid, is_system_server, se_info_ptr, nice_name_ptr) == -1) {
         fail_fn(CREATE_ERROR("selinux_android_setcontext(%d, %d, \"%s\", \"%s\") failed", uid,
@@ -1964,7 +2043,11 @@ void zygote::ZygoteFailure(JNIEnv* env,
   __builtin_unreachable();
 }
 
+static std::set<int>* gPreloadFds = nullptr;
+static bool gPreloadFdsExtracted = false;
+
 // Utility routine to fork a process from the zygote.
+NO_STACK_PROTECTOR
 pid_t zygote::ForkCommon(JNIEnv* env, bool is_system_server,
                          const std::vector<int>& fds_to_close,
                          const std::vector<int>& fds_to_ignore,
@@ -1989,9 +2072,12 @@ pid_t zygote::ForkCommon(JNIEnv* env, bool is_system_server,
   __android_log_close();
   AStatsSocket_close();
 
-  // If this is the first fork for this zygote, create the open FD table.  If
-  // it isn't, we just need to check whether the list of open files has changed
-  // (and it shouldn't in the normal case).
+  // If this is the first fork for this zygote, create the open FD table,
+  // verifying that files are of supported type and allowlisted.  Otherwise (not
+  // the first fork), check that the open files have not changed.  Newly open
+  // files are not expected, and will be disallowed in the future.  Currently
+  // they are allowed if they pass the same checks as in the
+  // FileDescriptorTable::Create() above.
   if (gOpenFdTable == nullptr) {
     gOpenFdTable = FileDescriptorTable::Create(fds_to_ignore, fail_fn);
   } else {
@@ -2018,6 +2104,11 @@ pid_t zygote::ForkCommon(JNIEnv* env, bool is_system_server,
       setpriority(PRIO_PROCESS, 0, PROCESS_PRIORITY_MIN);
     }
 
+#if defined(__BIONIC__)
+    // Reset the stack guard for the new process.
+    android_reset_stack_guards();
+#endif
+
     // The child process.
     PreApplicationInit();
 
@@ -2036,6 +2127,8 @@ pid_t zygote::ForkCommon(JNIEnv* env, bool is_system_server,
 
     // Reset the fd to the unsolicited zygote socket
     gSystemServerSocketFd = -1;
+  } else if (pid == -1) {
+    ALOGE("Failed to fork child process: %s (%d)", strerror(errno), errno);
   } else {
     ALOGD("Forked child process %d", pid);
   }
@@ -2050,6 +2143,7 @@ static void com_android_internal_os_Zygote_nativePreApplicationInit(JNIEnv*, jcl
   PreApplicationInit();
 }
 
+NO_STACK_PROTECTOR
 static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
         JNIEnv* env, jclass, jint uid, jint gid, jintArray gids, jint runtime_flags,
         jobjectArray rlimits, jint mount_external, jstring se_info, jstring nice_name,
@@ -2087,7 +2181,12 @@ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
         fds_to_ignore.push_back(gSystemServerSocketFd);
     }
 
-    pid_t pid = zygote::ForkCommon(env, false, fds_to_close, fds_to_ignore, true);
+    if (gPreloadFds && gPreloadFdsExtracted) {
+        fds_to_ignore.insert(fds_to_ignore.end(), gPreloadFds->begin(), gPreloadFds->end());
+    }
+
+    pid_t pid = zygote::ForkCommon(env, /* is_system_server= */ false, fds_to_close, fds_to_ignore,
+                                   true);
 
     if (pid == 0) {
         SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, capabilities, capabilities,
@@ -2099,6 +2198,7 @@ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
     return pid;
 }
 
+NO_STACK_PROTECTOR
 static jint com_android_internal_os_Zygote_nativeForkSystemServer(
         JNIEnv* env, jclass, uid_t uid, gid_t gid, jintArray gids,
         jint runtime_flags, jobjectArray rlimits, jlong permitted_capabilities,
@@ -2170,6 +2270,7 @@ static jint com_android_internal_os_Zygote_nativeForkSystemServer(
  * @param is_priority_fork  Controls the nice level assigned to the newly created process
  * @return child pid in the parent, 0 in the child
  */
+NO_STACK_PROTECTOR
 static jint com_android_internal_os_Zygote_nativeForkApp(JNIEnv* env,
                                                          jclass,
                                                          jint read_pipe_fd,
@@ -2184,6 +2285,7 @@ static jint com_android_internal_os_Zygote_nativeForkApp(JNIEnv* env,
                             args_known == JNI_TRUE, is_priority_fork == JNI_TRUE, true);
 }
 
+NO_STACK_PROTECTOR
 int zygote::forkApp(JNIEnv* env,
                     int read_pipe_fd,
                     int write_pipe_fd,
@@ -2224,6 +2326,10 @@ int zygote::forkApp(JNIEnv* env,
       }
       fds_to_ignore.push_back(gSystemServerSocketFd);
   }
+  if (gPreloadFds && gPreloadFdsExtracted) {
+      fds_to_ignore.insert(fds_to_ignore.end(), gPreloadFds->begin(), gPreloadFds->end());
+  }
+
   return zygote::ForkCommon(env, /* is_system_server= */ false, fds_to_close,
                             fds_to_ignore, is_priority_fork == JNI_TRUE, purge);
 }
@@ -2517,6 +2623,7 @@ static jint com_android_internal_os_Zygote_nativeCurrentTaggingLevel(JNIEnv* env
     case PR_MTE_TCF_SYNC:
       return MEMORY_TAG_LEVEL_SYNC;
     case PR_MTE_TCF_ASYNC:
+    case PR_MTE_TCF_ASYNC | PR_MTE_TCF_SYNC:
       return MEMORY_TAG_LEVEL_ASYNC;
     default:
       ALOGE("Unknown memory tagging level: %i", level);
@@ -2525,6 +2632,35 @@ static jint com_android_internal_os_Zygote_nativeCurrentTaggingLevel(JNIEnv* env
 #else // defined(__aarch64__)
   return 0;
 #endif // defined(__aarch64__)
+}
+
+static void com_android_internal_os_Zygote_nativeMarkOpenedFilesBeforePreload(JNIEnv* env, jclass) {
+    // Ignore invocations when too early or too late.
+    if (gPreloadFds) {
+        return;
+    }
+
+    // App Zygote Preload starts soon. Save FDs remaining open.  After the
+    // preload finishes newly open files will be determined.
+    auto fail_fn = std::bind(zygote::ZygoteFailure, env, "zygote", nullptr, _1);
+    gPreloadFds = GetOpenFds(fail_fn).release();
+}
+
+static void com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload(JNIEnv* env, jclass) {
+    // Ignore invocations when too early or too late.
+    if (!gPreloadFds || gPreloadFdsExtracted) {
+        return;
+    }
+
+    // Find the newly open FDs, if any.
+    auto fail_fn = std::bind(zygote::ZygoteFailure, env, "zygote", nullptr, _1);
+    std::unique_ptr<std::set<int>> current_fds = GetOpenFds(fail_fn);
+    auto difference = std::make_unique<std::set<int>>();
+    std::set_difference(current_fds->begin(), current_fds->end(), gPreloadFds->begin(),
+                        gPreloadFds->end(), std::inserter(*difference, difference->end()));
+    delete gPreloadFds;
+    gPreloadFds = difference.release();
+    gPreloadFdsExtracted = true;
 }
 
 static const JNINativeMethod gMethods[] = {
@@ -2575,6 +2711,10 @@ static const JNINativeMethod gMethods[] = {
          (void*)com_android_internal_os_Zygote_nativeSupportsTaggedPointers},
         {"nativeCurrentTaggingLevel", "()I",
          (void*)com_android_internal_os_Zygote_nativeCurrentTaggingLevel},
+        {"nativeMarkOpenedFilesBeforePreload", "()V",
+         (void*)com_android_internal_os_Zygote_nativeMarkOpenedFilesBeforePreload},
+        {"nativeAllowFilesOpenedByPreload", "()V",
+         (void*)com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload},
 };
 
 int register_com_android_internal_os_Zygote(JNIEnv* env) {
@@ -2585,6 +2725,16 @@ int register_com_android_internal_os_Zygote(JNIEnv* env) {
   gCallPostForkChildHooks = GetStaticMethodIDOrDie(env, gZygoteClass, "callPostForkChildHooks",
                                                    "(IZZLjava/lang/String;)V");
 
-  return RegisterMethodsOrDie(env, "com/android/internal/os/Zygote", gMethods, NELEM(gMethods));
+  gZygoteInitClass = MakeGlobalRefOrDie(env, FindClassOrDie(env, kZygoteInitClassName));
+  gGetOrCreateSystemServerClassLoader =
+          GetStaticMethodIDOrDie(env, gZygoteInitClass, "getOrCreateSystemServerClassLoader",
+                                 "()Ljava/lang/ClassLoader;");
+  gPrefetchStandaloneSystemServerJars =
+          GetStaticMethodIDOrDie(env, gZygoteInitClass, "prefetchStandaloneSystemServerJars",
+                                 "()V");
+
+  RegisterMethodsOrDie(env, "com/android/internal/os/Zygote", gMethods, NELEM(gMethods));
+
+  return JNI_OK;
 }
 }  // namespace android

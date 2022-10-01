@@ -28,13 +28,14 @@ import android.os.IBinder.DeathRecipient;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.os.UpdateEngine;
 import android.os.UpdateEngineCallback;
-import android.os.UserHandle;
-import android.os.UserManager;
 import android.provider.DeviceConfig;
 import android.util.Log;
 
+import com.android.internal.R;
+import com.android.internal.os.BackgroundThread;
 import com.android.server.IoThread;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
@@ -53,13 +54,17 @@ public final class ProfcollectForwardingService extends SystemService {
 
     private static final boolean DEBUG = Log.isLoggable(LOG_TAG, Log.DEBUG);
 
-    private static final long BG_PROCESS_PERIOD = DEBUG
-            ? TimeUnit.MINUTES.toMillis(1)
-            : TimeUnit.DAYS.toMillis(1);
+    private static final long BG_PROCESS_PERIOD = TimeUnit.HOURS.toMillis(4); // every 4 hours.
 
     private IProfCollectd mIProfcollect;
     private static ProfcollectForwardingService sSelfService;
     private final Handler mHandler = new ProfcollectdHandler(IoThread.getHandler().getLooper());
+
+    private IProviderStatusCallback mProviderStatusCallback = new IProviderStatusCallback.Stub() {
+        public void onProviderReady() {
+            mHandler.sendEmptyMessage(ProfcollectdHandler.MESSAGE_REGISTER_SCHEDULERS);
+        }
+    };
 
     public ProfcollectForwardingService(Context context) {
         super(context);
@@ -75,7 +80,7 @@ public final class ProfcollectForwardingService extends SystemService {
      */
     public static boolean enabled() {
         return DeviceConfig.getBoolean(DeviceConfig.NAMESPACE_PROFCOLLECT_NATIVE_BOOT, "enabled",
-            false);
+            false) || SystemProperties.getBoolean("persist.profcollectd.enabled_override", false);
     }
 
     @Override
@@ -92,10 +97,22 @@ public final class ProfcollectForwardingService extends SystemService {
             if (mIProfcollect == null) {
                 return;
             }
-            if (serviceHasSupportedTraceProvider()) {
-                registerObservers();
-            }
-            ProfcollectBGJobService.schedule(getContext());
+            BackgroundThread.get().getThreadHandler().post(() -> {
+                if (serviceHasSupportedTraceProvider()) {
+                    registerProviderStatusCallback();
+                }
+            });
+        }
+    }
+
+    private void registerProviderStatusCallback() {
+        if (mIProfcollect == null) {
+            return;
+        }
+        try {
+            mIProfcollect.registerProviderStatusCallback(mProviderStatusCallback);
+        } catch (RemoteException e) {
+            Log.e(LOG_TAG, "Failed to register provider status callback: " + e.getMessage());
         }
     }
 
@@ -106,7 +123,7 @@ public final class ProfcollectForwardingService extends SystemService {
         try {
             return !mIProfcollect.get_supported_provider().isEmpty();
         } catch (RemoteException e) {
-            Log.e(LOG_TAG, e.getMessage());
+            Log.e(LOG_TAG, "Failed to get supported provider: " + e.getMessage());
             return false;
         }
     }
@@ -140,6 +157,7 @@ public final class ProfcollectForwardingService extends SystemService {
         }
 
         public static final int MESSAGE_BINDER_CONNECT = 0;
+        public static final int MESSAGE_REGISTER_SCHEDULERS = 1;
 
         @Override
         public void handleMessage(android.os.Message message) {
@@ -147,8 +165,12 @@ public final class ProfcollectForwardingService extends SystemService {
                 case MESSAGE_BINDER_CONNECT:
                     connectNativeService();
                     break;
+                case MESSAGE_REGISTER_SCHEDULERS:
+                    registerObservers();
+                    ProfcollectBGJobService.schedule(getContext());
+                    break;
                 default:
-                    throw new AssertionError("Unknown message: " + message.toString());
+                    throw new AssertionError("Unknown message: " + message);
             }
         }
     }
@@ -183,6 +205,7 @@ public final class ProfcollectForwardingService extends SystemService {
                     .setRequiresDeviceIdle(true)
                     .setRequiresCharging(true)
                     .setPeriodic(BG_PROCESS_PERIOD)
+                    .setPriority(JobInfo.PRIORITY_MIN)
                     .build());
         }
 
@@ -192,11 +215,18 @@ public final class ProfcollectForwardingService extends SystemService {
                 Log.d(LOG_TAG, "Starting background process job");
             }
 
-            try {
-                sSelfService.mIProfcollect.process(false);
-            } catch (RemoteException e) {
-                Log.e(LOG_TAG, e.getMessage());
-            }
+            BackgroundThread.get().getThreadHandler().post(
+                    () -> {
+                        try {
+                            if (sSelfService.mIProfcollect == null) {
+                                return;
+                            }
+                            sSelfService.mIProfcollect.process();
+                        } catch (RemoteException e) {
+                            Log.e(LOG_TAG, "Failed to process profiles in background: "
+                                    + e.getMessage());
+                        }
+                    });
             return true;
         }
 
@@ -209,8 +239,11 @@ public final class ProfcollectForwardingService extends SystemService {
 
     // Event observers
     private void registerObservers() {
-        registerAppLaunchObserver();
-        registerOTAObserver();
+        BackgroundThread.get().getThreadHandler().post(
+                () -> {
+                    registerAppLaunchObserver();
+                    registerOTAObserver();
+                });
     }
 
     private final AppLaunchObserver mAppLaunchObserver = new AppLaunchObserver();
@@ -232,46 +265,23 @@ public final class ProfcollectForwardingService extends SystemService {
                 "applaunch_trace_freq", 2);
         int randomNum = ThreadLocalRandom.current().nextInt(100);
         if (randomNum < traceFrequency) {
-            try {
-                if (DEBUG) {
-                    Log.d(LOG_TAG, "Tracing on app launch event: " + packageName);
-                }
-                mIProfcollect.trace_once("applaunch");
-            } catch (RemoteException e) {
-                Log.e(LOG_TAG, e.getMessage());
+            if (DEBUG) {
+                Log.d(LOG_TAG, "Tracing on app launch event: " + packageName);
             }
+            BackgroundThread.get().getThreadHandler().post(() -> {
+                try {
+                    mIProfcollect.trace_once("applaunch");
+                } catch (RemoteException e) {
+                    Log.e(LOG_TAG, "Failed to initiate trace: " + e.getMessage());
+                }
+            });
         }
     }
 
-    private class AppLaunchObserver implements ActivityMetricsLaunchObserver {
+    private class AppLaunchObserver extends ActivityMetricsLaunchObserver {
         @Override
         public void onIntentStarted(Intent intent, long timestampNanos) {
             traceOnAppStart(intent.getPackage());
-        }
-
-        @Override
-        public void onIntentFailed() {
-            // Ignored
-        }
-
-        @Override
-        public void onActivityLaunched(byte[] activity, int temperature) {
-            // Ignored
-        }
-
-        @Override
-        public void onActivityLaunchCancelled(byte[] abortingActivity) {
-            // Ignored
-        }
-
-        @Override
-        public void onActivityLaunchFinished(byte[] finalActivity, long timestampNanos) {
-            // Ignored
-        }
-
-        @Override
-        public void onReportFullyDrawn(byte[] activity, long timestampNanos) {
-            // Ignored
         }
     }
 
@@ -280,6 +290,11 @@ public final class ProfcollectForwardingService extends SystemService {
         updateEngine.bind(new UpdateEngineCallback() {
             @Override
             public void onStatusUpdate(int status, float percent) {
+                if (DEBUG) {
+                    Log.d(LOG_TAG, "Received OTA status update, status: " + status + ", percent: "
+                            + percent);
+                }
+
                 if (status == UpdateEngine.UpdateStatusConstants.UPDATED_NEED_REBOOT) {
                     packProfileReport();
                 }
@@ -297,56 +312,27 @@ public final class ProfcollectForwardingService extends SystemService {
             return;
         }
 
-        final boolean uploadReport =
-                DeviceConfig.getBoolean(DeviceConfig.NAMESPACE_PROFCOLLECT_NATIVE_BOOT,
-                                        "upload_report", false);
-
-        new Thread(() -> {
+        Context context = getContext();
+        BackgroundThread.get().getThreadHandler().post(() -> {
             try {
-                String reportUuid = mIProfcollect.report();
+                // Prepare profile report
+                String reportName = mIProfcollect.report() + ".zip";
 
-                if (!uploadReport) {
+                if (!context.getResources().getBoolean(
+                        R.bool.config_profcollectReportUploaderEnabled)) {
+                    Log.i(LOG_TAG, "Upload is not enabled.");
                     return;
                 }
 
-                final int profileId = getBBProfileId();
-                mIProfcollect.copy_report_to_bb(profileId, reportUuid);
-                String reportPath =
-                        "/data/user/" + profileId
-                        + "/com.google.android.apps.internal.betterbug/cache/"
-                        + reportUuid + ".zip";
-                Intent uploadIntent =
-                        new Intent("com.google.android.apps.betterbug.intent.action.UPLOAD_PROFILE")
-                        .setPackage("com.google.android.apps.internal.betterbug")
-                        .putExtra("EXTRA_DESTINATION", "PROFCOLLECT")
-                        .putExtra("EXTRA_PACKAGE_NAME", getContext().getPackageName())
-                        .putExtra("EXTRA_PROFILE_PATH", reportPath)
-                        .addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-                Context context = getContext();
-                if (context.getPackageManager().queryBroadcastReceivers(uploadIntent, 0) != null) {
-                    context.sendBroadcast(uploadIntent);
-                }
-                mIProfcollect.delete_report(reportUuid);
+                // Upload the report
+                Intent intent = new Intent()
+                        .setPackage("com.android.shell")
+                        .setAction("com.android.shell.action.PROFCOLLECT_UPLOAD")
+                        .putExtra("filename", reportName);
+                context.sendBroadcast(intent);
             } catch (RemoteException e) {
-                Log.e(LOG_TAG, e.getMessage());
+                Log.e(LOG_TAG, "Failed to upload report: " + e.getMessage());
             }
-        }).start();
-    }
-
-    /**
-     * Get BetterBug's profile ID. It is the work profile ID, if it exists. Otherwise the system
-     * user ID.
-     *
-     * @return BetterBug's profile ID.
-     */
-    private int getBBProfileId() {
-        UserManager userManager = UserManager.get(getContext());
-        int[] profiles = userManager.getProfileIds(UserHandle.USER_SYSTEM, false);
-        for (int p : profiles) {
-            if (userManager.getUserInfo(p).isManagedProfile()) {
-                return p;
-            }
-        }
-        return UserHandle.USER_SYSTEM;
+        });
     }
 }

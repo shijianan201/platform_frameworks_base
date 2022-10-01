@@ -5,7 +5,7 @@
     <string name="keyboard_layouts_label" msgid="6688773268302087545">"የAndroid የቁልፍ ሰሌዳ"</string>
     <string name="keyboard_layout_english_uk_label" msgid="6664258463319999632">"እንግሊዝኛ (ዩኬ)"</string>
     <string name="keyboard_layout_english_us_label" msgid="8994890249649106291">"እንግሊዘኛ (ዩ.ኤስ.)"</string>
-    <string name="keyboard_layout_english_us_intl" msgid="3705168594034233583">"እንግሊዘኛ (ዩ. ኤስ.)፣ አለም አቀፍ ቅጥ"</string>
+    <string name="keyboard_layout_english_us_intl" msgid="3705168594034233583">"እንግሊዘኛ (ዩ. ኤስ.)፣ ዓለም አቀፍ ቅጥ"</string>
     <string name="keyboard_layout_english_us_colemak_label" msgid="4194969610343455380">"እንግሊዘኛ (ዩ. ኤስ.)፣ የኮልማርክ ቅጥ"</string>
     <string name="keyboard_layout_english_us_dvorak_label" msgid="793528923171145202">"እንግሊዘኛ (ዩ. ኤስ.)፣ የድቮራክ ቅጥ"</string>
     <string name="keyboard_layout_english_us_workman_label" msgid="2944541595262173111">"እንግሊዝኛ (አሜሪካ)፣ የሥራሰው ቅጥ"</string>
@@ -19,6 +19,7 @@
     <string name="keyboard_layout_swiss_german_label" msgid="2305520941993314258">"የስዊዝ ጀርመን"</string>
     <string name="keyboard_layout_belgian" msgid="2011984572838651558">"ቤልጂየም"</string>
     <string name="keyboard_layout_bulgarian" msgid="8951224309972028398">"ቡልጋሪያ"</string>
+    <string name="keyboard_layout_bulgarian_phonetic" msgid="7568914730360106653">"ቡልጋሪያኛ፣ ፎነቲክ"</string>
     <string name="keyboard_layout_italian" msgid="6497079660449781213">"ጣሊያንኛ"</string>
     <string name="keyboard_layout_danish" msgid="8036432066627127851">"ዴኒሽ"</string>
     <string name="keyboard_layout_norwegian" msgid="9090097917011040937">"ኖርዌጂያ"</string>

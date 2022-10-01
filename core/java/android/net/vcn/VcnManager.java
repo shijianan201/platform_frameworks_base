@@ -74,6 +74,44 @@ import java.util.concurrent.Executor;
 public class VcnManager {
     @NonNull private static final String TAG = VcnManager.class.getSimpleName();
 
+    /**
+     * Key for WiFi entry RSSI thresholds
+     *
+     * <p>The VCN will only migrate to a Carrier WiFi network that has a signal strength greater
+     * than, or equal to this threshold.
+     *
+     * <p>WARNING: The VCN does not listen for changes to this key made after VCN startup.
+     *
+     * @hide
+     */
+    @NonNull
+    public static final String VCN_NETWORK_SELECTION_WIFI_ENTRY_RSSI_THRESHOLD_KEY =
+            "vcn_network_selection_wifi_entry_rssi_threshold";
+
+    /**
+     * Key for WiFi entry RSSI thresholds
+     *
+     * <p>If the VCN's selected Carrier WiFi network has a signal strength less than this threshold,
+     * the VCN will attempt to migrate away from the Carrier WiFi network.
+     *
+     * <p>WARNING: The VCN does not listen for changes to this key made after VCN startup.
+     *
+     * @hide
+     */
+    @NonNull
+    public static final String VCN_NETWORK_SELECTION_WIFI_EXIT_RSSI_THRESHOLD_KEY =
+            "vcn_network_selection_wifi_exit_rssi_threshold";
+
+    // TODO: Add separate signal strength thresholds for 2.4 GHz and 5GHz
+
+    /** List of Carrier Config options to extract from Carrier Config bundles. @hide */
+    @NonNull
+    public static final String[] VCN_RELATED_CARRIER_CONFIG_KEYS =
+            new String[] {
+                VCN_NETWORK_SELECTION_WIFI_ENTRY_RSSI_THRESHOLD_KEY,
+                VCN_NETWORK_SELECTION_WIFI_EXIT_RSSI_THRESHOLD_KEY
+            };
+
     private static final Map<
                     VcnNetworkPolicyChangeListener, VcnUnderlyingNetworkPolicyListenerBinder>
             REGISTERED_POLICY_LISTENERS = new ConcurrentHashMap<>();
@@ -142,11 +180,11 @@ public class VcnManager {
      *
      * <p>An app that has carrier privileges for any of the subscriptions in the given group may
      * clear a VCN configuration. This API is ONLY permitted for callers running as the primary
-     * user. Any active VCN will be torn down.
+     * user. Any active VCN associated with this configuration will be torn down.
      *
      * @param subscriptionGroup the subscription group that the configuration should be applied to
-     * @throws SecurityException if the caller does not have carrier privileges, or is not running
-     *     as the primary user
+     * @throws SecurityException if the caller does not have carrier privileges, is not the owner of
+     *     the associated configuration, or is not running as the primary user
      * @throws IOException if the configuration failed to be cleared from disk. This may occur due
      *     to temporary disk errors, or more permanent conditions such as a full disk.
      */
@@ -166,8 +204,13 @@ public class VcnManager {
     /**
      * Retrieves the list of Subscription Groups for which a VCN Configuration has been set.
      *
-     * <p>The returned list will include only subscription groups for which the carrier app is
-     * privileged, and which have an associated {@link VcnConfig}.
+     * <p>The returned list will include only subscription groups for which an associated {@link
+     * VcnConfig} exists, and the app is either:
+     *
+     * <ul>
+     *   <li>Carrier privileged for that subscription group, or
+     *   <li>Is the provisioning package of the config
+     * </ul>
      *
      * @throws SecurityException if the caller is not running as the primary user
      */

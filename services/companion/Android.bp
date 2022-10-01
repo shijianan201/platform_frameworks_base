@@ -9,14 +9,23 @@ package {
 
 filegroup {
     name: "services.companion-sources",
-    srcs: ["java/**/*.java"],
+    srcs: [
+        "java/**/*.java",
+        "java/**/*.proto",
+    ],
     path: "java",
     visibility: ["//frameworks/base/services"],
 }
 
 java_library_static {
     name: "services.companion",
-    defaults: ["services_defaults"],
+    defaults: ["platform_service_defaults"],
+    proto: {
+        type: "stream",
+    },
     srcs: [":services.companion-sources"],
-    libs: ["services.core"],
+    libs: [
+        "app-compat-annotations",
+        "services.core",
+    ],
 }

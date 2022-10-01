@@ -16,6 +16,8 @@
 
 package android.security.keystore2;
 
+import static android.security.keystore2.AndroidKeyStoreCipherSpiBase.DEFAULT_MGF1_DIGEST;
+
 import android.annotation.NonNull;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.security.keymint.HardwareAuthenticatorType;
@@ -40,6 +42,8 @@ import android.system.keystore2.KeyEntryResponse;
 import android.system.keystore2.KeyMetadata;
 import android.system.keystore2.ResponseCode;
 import android.util.Log;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -509,6 +513,28 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
                         KeymasterDefs.KM_TAG_PADDING,
                         padding
                 ));
+                if (padding == KeymasterDefs.KM_PAD_RSA_OAEP) {
+                    if (spec.isDigestsSpecified()) {
+                        boolean hasDefaultMgf1DigestBeenAdded = false;
+                        for (String digest : spec.getDigests()) {
+                            importArgs.add(KeyStore2ParameterUtils.makeEnum(
+                                    KeymasterDefs.KM_TAG_RSA_OAEP_MGF_DIGEST,
+                                    KeyProperties.Digest.toKeymaster(digest)
+                            ));
+                            hasDefaultMgf1DigestBeenAdded |= digest.equals(DEFAULT_MGF1_DIGEST);
+                        }
+                        /* Because of default MGF1 digest is SHA-1. It has to be added in Key
+                         * characteristics. Otherwise, crypto operations will fail with Incompatible
+                         * MGF1 digest.
+                         */
+                        if (!hasDefaultMgf1DigestBeenAdded) {
+                            importArgs.add(KeyStore2ParameterUtils.makeEnum(
+                                    KeymasterDefs.KM_TAG_RSA_OAEP_MGF_DIGEST,
+                                    KeyProperties.Digest.toKeymaster(DEFAULT_MGF1_DIGEST)
+                            ));
+                        }
+                    }
+                }
             }
             for (String padding : spec.getSignaturePaddings()) {
                 importArgs.add(KeyStore2ParameterUtils.makeEnum(
@@ -577,7 +603,7 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
         //
         // Note: mNamespace == KeyProperties.NAMESPACE_APPLICATION implies that the target domain
         // is Domain.APP and Domain.SELINUX is the target domain otherwise.
-        if (alias != descriptor.alias
+        if (!alias.equals(descriptor.alias)
                 || descriptor.domain != targetDomain
                 || (descriptor.domain == Domain.SELINUX && descriptor.nspace != targetNamespace)) {
             throw new KeyStoreException("Can only replace keys with same alias: " + alias
@@ -599,8 +625,6 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
         }
         KeyProtection params = (KeyProtection) param;
 
-        @SecurityLevel int securityLevel = params.isStrongBoxBacked() ? SecurityLevel.STRONGBOX :
-                SecurityLevel.TRUSTED_ENVIRONMENT;
         @Domain int targetDomain = (getTargetDomain());
 
         if (key instanceof AndroidKeyStoreSecretKey) {
@@ -792,6 +816,9 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
             flags |= IKeystoreSecurityLevel.KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING;
         }
 
+        @SecurityLevel int securityLevel = params.isStrongBoxBacked() ? SecurityLevel.STRONGBOX :
+                SecurityLevel.TRUSTED_ENVIRONMENT;
+
         try {
             KeyStoreSecurityLevel securityLevelInterface = mKeyStore.getSecurityLevel(
                     securityLevel);
@@ -974,7 +1001,6 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
     }
 
     private Set<String> getUniqueAliases() {
-
         try {
             final KeyDescriptor[] keys = mKeyStore.list(
                     getTargetDomain(),
@@ -987,7 +1013,7 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
             return aliases;
         } catch (android.security.KeyStoreException e) {
             Log.e(TAG, "Failed to list keystore entries.", e);
-            return null;
+            return new HashSet<>();
         }
     }
 
@@ -1097,6 +1123,17 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
             }
         }
         return caAlias;
+    }
+
+    /**
+     * Used by Tests to initialize with a fake KeyStore2.
+     * @hide
+     * @param keystore
+     */
+    @VisibleForTesting
+    public void initForTesting(KeyStore2 keystore) {
+        mKeyStore = keystore;
+        mNamespace = KeyProperties.NAMESPACE_APPLICATION;
     }
 
     @Override

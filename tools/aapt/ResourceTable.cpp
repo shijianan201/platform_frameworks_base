@@ -2475,11 +2475,10 @@ void ResourceTable::reportError(void* accessorCookie, const char* fmt, ...)
 {
     if (accessorCookie != NULL && fmt != NULL) {
         AccessorCookie* ac = (AccessorCookie*)accessorCookie;
-        int retval=0;
         char buf[1024];
         va_list ap;
         va_start(ap, fmt);
-        retval = vsnprintf(buf, sizeof(buf), fmt, ap);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
         va_end(ap);
         ac->sourcePos.error("Error: %s (at '%s' with value '%s').\n",
                             buf, ac->attr.string(), ac->value.string());
@@ -2970,14 +2969,6 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
                         continue;
                     }
                     e->setNameIndex(keyStrings.add(e->getName(), true));
-
-                    // If this entry has no values for other configs,
-                    // and is the default config, then it is special.  Otherwise
-                    // we want to add it with the config info.
-                    ConfigDescription* valueConfig = NULL;
-                    if (N != 1 || config == nullConfig) {
-                        valueConfig = &config;
-                    }
 
                     status_t err = e->prepareFlatten(&valueStrings, this,
                             &configTypeName, &config);

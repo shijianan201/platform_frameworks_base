@@ -18,6 +18,7 @@ package android.telecom;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
 import android.annotation.SdkConstant;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
@@ -150,6 +151,7 @@ public abstract class ConnectionService extends Service {
     private static final String SESSION_POST_DIAL_CONT = "CS.oPDC";
     private static final String SESSION_PULL_EXTERNAL_CALL = "CS.pEC";
     private static final String SESSION_SEND_CALL_EVENT = "CS.sCE";
+    private static final String SESSION_CALL_FILTERING_COMPLETED = "CS.oCFC";
     private static final String SESSION_HANDOVER_COMPLETE = "CS.hC";
     private static final String SESSION_EXTRAS_CHANGED = "CS.oEC";
     private static final String SESSION_START_RTT = "CS.+RTT";
@@ -752,6 +754,22 @@ public abstract class ConnectionService extends Service {
                 args.arg3 = extras;
                 args.arg4 = Log.createSubsession();
                 mHandler.obtainMessage(MSG_SEND_CALL_EVENT, args).sendToTarget();
+            } finally {
+                Log.endSession();
+            }
+        }
+
+        @Override
+        public void onCallFilteringCompleted(String callId,
+                Connection.CallFilteringCompletionInfo completionInfo,
+                Session.Info sessionInfo) {
+            Log.startSession(sessionInfo, SESSION_CALL_FILTERING_COMPLETED);
+            try {
+                SomeArgs args = SomeArgs.obtain();
+                args.arg1 = callId;
+                args.arg2 = completionInfo;
+                args.arg3 = Log.createSubsession();
+                mHandler.obtainMessage(MSG_ON_CALL_FILTERING_COMPLETED, args).sendToTarget();
             } finally {
                 Log.endSession();
             }
@@ -1412,6 +1430,21 @@ public abstract class ConnectionService extends Service {
                         String event = (String) args.arg2;
                         Bundle extras = (Bundle) args.arg3;
                         sendCallEvent(callId, event, extras);
+                    } finally {
+                        args.recycle();
+                        Log.endSession();
+                    }
+                    break;
+                }
+                case MSG_ON_CALL_FILTERING_COMPLETED: {
+                    SomeArgs args = (SomeArgs) msg.obj;
+                    try {
+                        Log.continueSession((Session) args.arg3,
+                                SESSION_HANDLER + SESSION_CALL_FILTERING_COMPLETED);
+                        String callId = (String) args.arg1;
+                        Connection.CallFilteringCompletionInfo completionInfo =
+                                (Connection.CallFilteringCompletionInfo) args.arg2;
+                        onCallFilteringCompleted(callId, completionInfo);
                     } finally {
                         args.recycle();
                         Log.endSession();
@@ -2435,6 +2468,15 @@ public abstract class ConnectionService extends Service {
         }
     }
 
+    private void onCallFilteringCompleted(String callId, Connection.CallFilteringCompletionInfo
+            callFilteringCompletionInfo) {
+        Log.i(this, "onCallFilteringCompleted(%s, %s)", callId, callFilteringCompletionInfo);
+        Connection connection = findConnectionForAction(callId, "onCallFilteringCompleted");
+        if (connection != null) {
+            connection.onCallFilteringCompleted(callFilteringCompletionInfo);
+        }
+    }
+
     /**
      * Notifies a {@link Connection} that a handover has completed.
      *
@@ -3115,15 +3157,32 @@ public abstract class ConnectionService extends Service {
     }
 
     /**
-     * Create a {@code Connection} for a new unknown call. An unknown call is a call originating
-     * from the ConnectionService that was neither a user-initiated outgoing call, nor an incoming
-     * call created using
-     * {@code TelecomManager#addNewIncomingCall(PhoneAccountHandle, android.os.Bundle)}.
+     * Calls of this type are created using
+     * {@link TelecomManager#addNewUnknownCall(PhoneAccountHandle, Bundle)}.  Unknown calls
+     * are used for representing calls which become known to the {@link ConnectionService}
+     * midway through the call.
      *
+     * For example, a call transferred from one device to answer would surface as an active
+     * call in Telecom instead of going through a typical Ringing to Active transition, or
+     * Dialing to Active transition.
+     *
+     * A {@link ConnectionService} can return {@code null} (the default behavior)
+     * if it is not able to handle a request for the requested unknown connection.
+     *
+     * {@link TelecomManager#addNewIncomingCall(PhoneAccountHandle, android.os.Bundle)}.
+     *
+     * @param connectionManagerPhoneAccount The connection manager account to use for managing
+     *                                      this call
+     * @param request Details about the outgoing call
+     * @return The {@code Connection} object to satisfy this call, or the result of an invocation
+     *         of {@link Connection#createFailedConnection(DisconnectCause)} to not handle the call
      * @hide
      */
-    public Connection onCreateUnknownConnection(PhoneAccountHandle connectionManagerPhoneAccount,
-            ConnectionRequest request) {
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    @RequiresPermission(android.Manifest.permission.MODIFY_PHONE_STATE)
+    public @Nullable Connection onCreateUnknownConnection(
+            @NonNull PhoneAccountHandle connectionManagerPhoneAccount,
+            @NonNull ConnectionRequest request) {
         return null;
     }
 
@@ -3406,5 +3465,14 @@ public abstract class ConnectionService extends Service {
     @VisibleForTesting
     public Handler getHandler() {
         return mHandler;
+    }
+
+    /**
+     * Sets this {@link ConnectionService} ready for testing purposes.
+     * @hide
+     */
+    @VisibleForTesting
+    public void setReadyForTest() {
+        mAreAccountsInitialized = true;
     }
 }

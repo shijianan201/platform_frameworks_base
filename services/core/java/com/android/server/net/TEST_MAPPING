@@ -2,13 +2,12 @@
   "presubmit-large": [
     {
       "name": "CtsHostsideNetworkTests",
-      "file_patterns": ["(/|^)NetworkPolicy[^/]*\\.java"],
       "options": [
         {
-          "include-filter": "com.android.cts.net.HostsideRestrictBackgroundNetworkTests"
+          "exclude-annotation": "androidx.test.filters.FlakyTest"
         },
         {
-          "exclude-annotation": "androidx.test.filters.FlakyTest"
+          "exclude-annotation": "android.platform.test.annotations.FlakyTest"
         }
       ]
     }

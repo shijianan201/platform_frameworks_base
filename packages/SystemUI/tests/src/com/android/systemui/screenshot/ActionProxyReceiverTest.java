@@ -16,22 +16,20 @@
 
 package com.android.systemui.screenshot;
 
-import static com.android.systemui.screenshot.GlobalScreenshot.ACTION_TYPE_SHARE;
-import static com.android.systemui.screenshot.GlobalScreenshot.EXTRA_ID;
-import static com.android.systemui.screenshot.GlobalScreenshot.EXTRA_SMART_ACTIONS_ENABLED;
-import static com.android.systemui.statusbar.phone.StatusBar.SYSTEM_DIALOG_REASON_SCREENSHOT;
+import static com.android.systemui.screenshot.ScreenshotController.ACTION_TYPE_SHARE;
+import static com.android.systemui.screenshot.ScreenshotController.EXTRA_ID;
+import static com.android.systemui.screenshot.ScreenshotController.EXTRA_SMART_ACTIONS_ENABLED;
+import static com.android.systemui.statusbar.phone.CentralSurfaces.SYSTEM_DIALOG_REASON_SCREENSHOT;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import android.app.PendingIntent;
 import android.content.Context;
@@ -43,7 +41,7 @@ import androidx.test.filters.SmallTest;
 
 import com.android.systemui.SysuiTestCase;
 import com.android.systemui.shared.system.ActivityManagerWrapper;
-import com.android.systemui.statusbar.phone.StatusBar;
+import com.android.systemui.statusbar.phone.CentralSurfaces;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -54,8 +52,6 @@ import org.mockito.stubbing.Answer;
 
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 @RunWith(AndroidTestingRunner.class)
@@ -63,11 +59,9 @@ import java.util.concurrent.TimeoutException;
 public class ActionProxyReceiverTest extends SysuiTestCase {
 
     @Mock
-    private StatusBar mMockStatusBar;
+    private CentralSurfaces mMockCentralSurfaces;
     @Mock
     private ActivityManagerWrapper mMockActivityManagerWrapper;
-    @Mock
-    private Future mMockFuture;
     @Mock
     private ScreenshotSmartActions mMockScreenshotSmartActions;
     @Mock
@@ -79,10 +73,7 @@ public class ActionProxyReceiverTest extends SysuiTestCase {
     public void setup() throws InterruptedException, ExecutionException, TimeoutException {
         MockitoAnnotations.initMocks(this);
         mIntent = new Intent(mContext, ActionProxyReceiver.class)
-                .putExtra(GlobalScreenshot.EXTRA_ACTION_INTENT, mMockPendingIntent);
-
-        when(mMockActivityManagerWrapper.closeSystemWindows(anyString())).thenReturn(mMockFuture);
-        when(mMockFuture.get(anyLong(), any(TimeUnit.class))).thenReturn(null);
+                .putExtra(ScreenshotController.EXTRA_ACTION_INTENT, mMockPendingIntent);
     }
 
     @Test
@@ -92,7 +83,7 @@ public class ActionProxyReceiverTest extends SysuiTestCase {
         actionProxyReceiver.onReceive(mContext, mIntent);
 
         verify(mMockActivityManagerWrapper).closeSystemWindows(SYSTEM_DIALOG_REASON_SCREENSHOT);
-        verify(mMockStatusBar, never()).executeRunnableDismissingKeyguard(
+        verify(mMockCentralSurfaces, never()).executeRunnableDismissingKeyguard(
                 any(Runnable.class), any(Runnable.class), anyBoolean(), anyBoolean(), anyBoolean());
         verify(mMockPendingIntent).send(
                 eq(mContext), anyInt(), isNull(), isNull(), isNull(), isNull(), any(Bundle.class));
@@ -105,13 +96,13 @@ public class ActionProxyReceiverTest extends SysuiTestCase {
         doAnswer((Answer<Object>) invocation -> {
             ((Runnable) invocation.getArgument(0)).run();
             return null;
-        }).when(mMockStatusBar).executeRunnableDismissingKeyguard(
+        }).when(mMockCentralSurfaces).executeRunnableDismissingKeyguard(
                 any(Runnable.class), isNull(), anyBoolean(), anyBoolean(), anyBoolean());
 
         actionProxyReceiver.onReceive(mContext, mIntent);
 
         verify(mMockActivityManagerWrapper).closeSystemWindows(SYSTEM_DIALOG_REASON_SCREENSHOT);
-        verify(mMockStatusBar).executeRunnableDismissingKeyguard(
+        verify(mMockCentralSurfaces).executeRunnableDismissingKeyguard(
                 any(Runnable.class), isNull(), eq(true), eq(true), eq(true));
         verify(mMockPendingIntent).send(
                 eq(mContext), anyInt(), isNull(), isNull(), isNull(), isNull(), any(Bundle.class));
@@ -124,7 +115,8 @@ public class ActionProxyReceiverTest extends SysuiTestCase {
         actionProxyReceiver.onReceive(mContext, mIntent);
 
         verify(mMockScreenshotSmartActions, never())
-                .notifyScreenshotAction(any(Context.class), anyString(), anyString(), anyBoolean());
+                .notifyScreenshotAction(any(Context.class), anyString(), anyString(), anyBoolean(),
+                        any(Intent.class));
     }
 
     @Test
@@ -137,13 +129,13 @@ public class ActionProxyReceiverTest extends SysuiTestCase {
         actionProxyReceiver.onReceive(mContext, mIntent);
 
         verify(mMockScreenshotSmartActions).notifyScreenshotAction(
-                mContext, testId, ACTION_TYPE_SHARE, false);
+                mContext, testId, ACTION_TYPE_SHARE, false, null);
     }
 
     private ActionProxyReceiver constructActionProxyReceiver(boolean withStatusBar) {
         if (withStatusBar) {
             return new ActionProxyReceiver(
-                    Optional.of(mMockStatusBar), mMockActivityManagerWrapper,
+                    Optional.of(mMockCentralSurfaces), mMockActivityManagerWrapper,
                     mMockScreenshotSmartActions);
         } else {
             return new ActionProxyReceiver(

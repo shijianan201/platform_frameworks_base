@@ -45,6 +45,7 @@ public final class AutomaticZenRule implements Parcelable {
     private long creationTime;
     private ZenPolicy mZenPolicy;
     private boolean mModified = false;
+    private String mPkg;
 
     /**
      * Creates an automatic zen rule.
@@ -117,12 +118,13 @@ public final class AutomaticZenRule implements Parcelable {
             name = source.readString();
         }
         interruptionFilter = source.readInt();
-        conditionId = source.readParcelable(null);
-        owner = source.readParcelable(null);
-        configurationActivity = source.readParcelable(null);
+        conditionId = source.readParcelable(null, android.net.Uri.class);
+        owner = source.readParcelable(null, android.content.ComponentName.class);
+        configurationActivity = source.readParcelable(null, android.content.ComponentName.class);
         creationTime = source.readLong();
-        mZenPolicy = source.readParcelable(null);
+        mZenPolicy = source.readParcelable(null, android.service.notification.ZenPolicy.class);
         mModified = source.readInt() == ENABLED;
+        mPkg = source.readString();
     }
 
     /**
@@ -244,6 +246,20 @@ public final class AutomaticZenRule implements Parcelable {
         this.configurationActivity = componentName;
     }
 
+    /**
+     * @hide
+     */
+    public void setPackageName(String pkgName) {
+        mPkg = pkgName;
+    }
+
+    /**
+     * @hide
+     */
+    public String getPackageName() {
+        return mPkg;
+    }
+
     @Override
     public int describeContents() {
         return 0;
@@ -265,6 +281,7 @@ public final class AutomaticZenRule implements Parcelable {
         dest.writeLong(creationTime);
         dest.writeParcelable(mZenPolicy, 0);
         dest.writeInt(mModified ? ENABLED : DISABLED);
+        dest.writeString(mPkg);
     }
 
     @Override
@@ -273,6 +290,7 @@ public final class AutomaticZenRule implements Parcelable {
                 .append("enabled=").append(enabled)
                 .append(",name=").append(name)
                 .append(",interruptionFilter=").append(interruptionFilter)
+                .append(",pkg=").append(mPkg)
                 .append(",conditionId=").append(conditionId)
                 .append(",owner=").append(owner)
                 .append(",configActivity=").append(configurationActivity)
@@ -282,7 +300,7 @@ public final class AutomaticZenRule implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (!(o instanceof AutomaticZenRule)) return false;
         if (o == this) return true;
         final AutomaticZenRule other = (AutomaticZenRule) o;
@@ -294,13 +312,14 @@ public final class AutomaticZenRule implements Parcelable {
                 && Objects.equals(other.owner, owner)
                 && Objects.equals(other.mZenPolicy, mZenPolicy)
                 && Objects.equals(other.configurationActivity, configurationActivity)
+                && Objects.equals(other.mPkg, mPkg)
                 && other.creationTime == creationTime;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(enabled, name, interruptionFilter, conditionId, owner,
-                configurationActivity, mZenPolicy, mModified, creationTime);
+                configurationActivity, mZenPolicy, mModified, creationTime, mPkg);
     }
 
     public static final @android.annotation.NonNull Parcelable.Creator<AutomaticZenRule> CREATOR

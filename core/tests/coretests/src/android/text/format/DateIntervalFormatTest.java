@@ -169,13 +169,13 @@ public class DateIntervalFormatTest {
 
         assertEquals("19/1/2009", formatDateRange(es_ES, tz, fixedTime, fixedTime + HOUR,
                 FORMAT_SHOW_YEAR | FORMAT_NUMERIC_DATE));
-        assertEquals("19/1/2009–22/1/2009",
+        assertEquals("19/1/2009 – 22/1/2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * DAY,
                         FORMAT_SHOW_YEAR | FORMAT_NUMERIC_DATE));
-        assertEquals("19/1/2009–22/4/2009",
+        assertEquals("19/1/2009 – 22/4/2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * MONTH,
                         FORMAT_SHOW_YEAR | FORMAT_NUMERIC_DATE));
-        assertEquals("19/1/2009–9/2/2012",
+        assertEquals("19/1/2009 – 9/2/2012",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * YEAR,
                         FORMAT_SHOW_YEAR | FORMAT_NUMERIC_DATE));
 
@@ -251,35 +251,35 @@ public class DateIntervalFormatTest {
 
         assertEquals("19–22 de enero de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * DAY, 0));
-        assertEquals("19–22 de ene. de 2009",
+        assertEquals("19–22 de ene de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * DAY,
                         FORMAT_SHOW_DATE | FORMAT_ABBREV_ALL));
-        assertEquals("lun, 19 de ene. – jue, 22 de ene. de 2009",
+        assertEquals("lun, 19 de ene – jue, 22 de ene de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * DAY,
                         FORMAT_SHOW_WEEKDAY | FORMAT_ABBREV_ALL));
-        assertEquals("lunes, 19 de enero–jueves, 22 de enero de 2009",
+        assertEquals("lunes, 19 de enero – jueves, 22 de enero de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * DAY, FORMAT_SHOW_WEEKDAY));
 
-        assertEquals("19 de enero–22 de abril de 2009",
+        assertEquals("19 de enero – 22 de abril de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * MONTH, 0));
-        assertEquals("19 de ene. – 22 de abr. 2009",
+        assertEquals("19 de ene – 22 de abr 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * MONTH,
                         FORMAT_SHOW_DATE | FORMAT_ABBREV_ALL));
-        assertEquals("lun, 19 de ene. – mié, 22 de abr. de 2009",
+        assertEquals("lun, 19 de ene – mié, 22 de abr de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * MONTH,
                         FORMAT_SHOW_WEEKDAY | FORMAT_ABBREV_ALL));
         assertEquals("enero–abril de 2009",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * MONTH, FORMAT_NO_MONTH_DAY));
 
-        assertEquals("19 de ene. de 2009 – 9 de feb. de 2012",
+        assertEquals("19 de ene de 2009 – 9 de feb de 2012",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * YEAR,
                         FORMAT_SHOW_DATE | FORMAT_ABBREV_ALL));
-        assertEquals("ene. de 2009 – feb. de 2012",
+        assertEquals("ene de 2009 – feb de 2012",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * YEAR,
                         FORMAT_NO_MONTH_DAY | FORMAT_ABBREV_ALL));
-        assertEquals("19 de enero de 2009–9 de febrero de 2012",
+        assertEquals("19 de enero de 2009 – 9 de febrero de 2012",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * YEAR, 0));
-        assertEquals("lunes, 19 de enero de 2009–jueves, 9 de febrero de 2012",
+        assertEquals("lunes, 19 de enero de 2009 – jueves, 9 de febrero de 2012",
                 formatDateRange(es_US, tz, fixedTime, fixedTime + 3 * YEAR, FORMAT_SHOW_WEEKDAY));
 
         // The same tests but for es_ES.
@@ -291,10 +291,10 @@ public class DateIntervalFormatTest {
         assertEquals("lun, 19 ene – jue, 22 ene 2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * DAY,
                         FORMAT_SHOW_WEEKDAY | FORMAT_ABBREV_ALL));
-        assertEquals("lunes, 19 de enero–jueves, 22 de enero de 2009",
+        assertEquals("lunes, 19 de enero – jueves, 22 de enero de 2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * DAY, FORMAT_SHOW_WEEKDAY));
 
-        assertEquals("19 de enero–22 de abril de 2009",
+        assertEquals("19 de enero – 22 de abril de 2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * MONTH, 0));
         assertEquals("19 ene – 22 abr 2009",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * MONTH,
@@ -311,9 +311,9 @@ public class DateIntervalFormatTest {
         assertEquals("ene 2009 – feb 2012",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * YEAR,
                         FORMAT_NO_MONTH_DAY | FORMAT_ABBREV_ALL));
-        assertEquals("19 de enero de 2009–9 de febrero de 2012",
+        assertEquals("19 de enero de 2009 – 9 de febrero de 2012",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * YEAR, 0));
-        assertEquals("lunes, 19 de enero de 2009–jueves, 9 de febrero de 2012",
+        assertEquals("lunes, 19 de enero de 2009 – jueves, 9 de febrero de 2012",
                 formatDateRange(es_ES, tz, fixedTime, fixedTime + 3 * YEAR, FORMAT_SHOW_WEEKDAY));
     }
 
@@ -426,7 +426,7 @@ public class DateIntervalFormatTest {
 
         assertEquals("January 1, 1970, 22:00 – 00:00",
                 formatDateRange(l, utc, 22 * HOUR, 24 * HOUR, flags));
-        assertEquals("January 1, 1970, 22:00 – January 2, 1970, 00:30",
+        assertEquals("January 1, 1970 at 22:00 – January 2, 1970 at 00:30",
                 formatDateRange(l, utc, 22 * HOUR, 24 * HOUR + 30 * MINUTE, flags));
     }
 
@@ -445,7 +445,7 @@ public class DateIntervalFormatTest {
         long jan_1_1980 = c.getTimeInMillis();
         assertEquals("January 1, 1980, 22:00 – 00:00",
                 formatDateRange(l, utc, jan_1_1980 + 22 * HOUR, jan_1_1980 + 24 * HOUR, flags));
-        assertEquals("January 1, 1980, 22:00 – January 2, 1980, 00:30",
+        assertEquals("January 1, 1980 at 22:00 – January 2, 1980 at 00:30",
                 formatDateRange(l, utc, jan_1_1980 + 22 * HOUR,
                         jan_1_1980 + 24 * HOUR + 30 * MINUTE, flags));
     }
@@ -481,22 +481,22 @@ public class DateIntervalFormatTest {
 
         int flags = FORMAT_SHOW_DATE | FORMAT_SHOW_WEEKDAY | FORMAT_SHOW_TIME | FORMAT_24HOUR;
 
-        assertEquals("Thursday, January 1, 1970, 00:00", formatDateRange(l, utc, 0L, 0L, flags));
+        assertEquals("Thursday, January 1, 1970 at 00:00", formatDateRange(l, utc, 0L, 0L, flags));
 
         long t1833 = ((long) Integer.MIN_VALUE + Integer.MIN_VALUE) * 1000L;
-        assertEquals("Sunday, November 24, 1833, 17:31",
+        assertEquals("Sunday, November 24, 1833 at 17:31",
                 formatDateRange(l, utc, t1833, t1833, flags));
 
         long t1901 = Integer.MIN_VALUE * 1000L;
-        assertEquals("Friday, December 13, 1901, 20:45",
+        assertEquals("Friday, December 13, 1901 at 20:45",
                 formatDateRange(l, utc, t1901, t1901, flags));
 
         long t2038 = Integer.MAX_VALUE * 1000L;
-        assertEquals("Tuesday, January 19, 2038, 03:14",
+        assertEquals("Tuesday, January 19, 2038 at 03:14",
                 formatDateRange(l, utc, t2038, t2038, flags));
 
         long t2106 = (2L + Integer.MAX_VALUE + Integer.MAX_VALUE) * 1000L;
-        assertEquals("Sunday, February 7, 2106, 06:28",
+        assertEquals("Sunday, February 7, 2106 at 06:28",
                 formatDateRange(l, utc, t2106, t2106, flags));
     }
 
@@ -631,18 +631,18 @@ public class DateIntervalFormatTest {
         // behaviour of suppressing the date for the end...
         assertEquals("February 27, 2007, 04:00 – 00:00", fmt.apply(1172548800000L, 1172620800000L));
         // ...unless the start-point is also midnight, in which case we need dates to disambiguate.
-        assertEquals("February 27, 2007, 00:00 – February 28, 2007, 00:00",
+        assertEquals("February 27, 2007 at 00:00 – February 28, 2007 at 00:00",
                 fmt.apply(1172534400000L, 1172620800000L));
         // We want to show the date if the end-point is a millisecond after midnight the following
         // day, or if it is exactly midnight the day after that.
-        assertEquals("February 27, 2007, 04:00 – February 28, 2007, 00:00",
+        assertEquals("February 27, 2007 at 04:00 – February 28, 2007 at 00:00",
                 fmt.apply(1172548800000L, 1172620800001L));
-        assertEquals("February 27, 2007, 04:00 – March 1, 2007, 00:00",
+        assertEquals("February 27, 2007 at 04:00 – March 1, 2007 at 00:00",
                 fmt.apply(1172548800000L, 1172707200000L));
         // We want to show the date if the start-point is anything less than a minute after
       // midnight,
         // since that gets displayed as midnight...
-        assertEquals("February 27, 2007, 00:00 – February 28, 2007, 00:00",
+        assertEquals("February 27, 2007 at 00:00 – February 28, 2007 at 00:00",
                 fmt.apply(1172534459999L, 1172620800000L));
         // ...but not if it is exactly one minute after midnight.
         assertEquals("February 27, 2007, 00:01 – 00:00", fmt.apply(1172534460000L, 1172620800000L));
